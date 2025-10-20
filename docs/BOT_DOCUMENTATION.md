@@ -16,7 +16,6 @@ Responsável por controlar o ciclo de vida dos eventos de presença.
 - **startEvent(guild, name, roleId, channelIds, startedBy):** cria um evento ativo para um cargo e uma lista de salas de voz. Todos os membros que já estiverem conectados aos canais de voz monitorados terão seu tempo contabilizado a partir do momento de criação.
 - **handleVoiceUpdate(oldState, newState):** ouve as mudanças de voz dos usuários e registra automaticamente o tempo conectado para cada evento ativo. Usuários precisam possuir o cargo monitorado para terem o tempo registrado.
 - **endEvent(guild, name, roleIdToCheck):** encerra o evento, calcula o tempo total dos participantes, identifica quem faltou entre os membros do cargo informado no encerramento e salva um histórico em `data/events.json`.
-- **endEvent(guild, name):** encerra o evento, calcula o tempo total dos participantes, identifica quem faltou (membros do cargo que não tiveram tempo registrado) e salva um histórico em `data/events.json`.
 - **listActive():** retorna uma lista dos eventos ativos com cargo, canais monitorados e horário de início.
 
 ### `ReactionRoleManager`
@@ -30,6 +29,15 @@ Cuida das mensagens que atribuem cargos por reação.
 ### `Comandos do bot`
 
 > Utilize sempre o prefixo configurado (por padrão `!`). Argumentos com espaços podem ser envolvidos por aspas duplas.
+
+#### `event start`
+- **Função:** abre um assistente interativo diretamente no chat para configurar um novo evento.
+- **Como funciona:** ao digitar apenas `event start`, o bot responderá com uma mensagem contendo botões e seletores para:
+  - Definir o nome do evento por meio de um modal.
+  - Escolher o cargo que terá a presença monitorada.
+  - Selecionar um ou mais canais de voz (ou palco) que farão parte do evento.
+- **Confirmação:** após preencher todas as etapas, clique em **Iniciar evento** para ativar o rastreamento sem precisar digitar os argumentos manualmente.
+- **Expiração:** o assistente expira automaticamente após alguns minutos de inatividade; nesse caso, execute o comando novamente.
 
 #### `event start "Nome do Evento" <cargo> <canal ...>`
 - **Função:** inicia o rastreamento de presença para o cargo informado em um ou mais canais de voz.
@@ -46,12 +54,6 @@ Cuida das mensagens que atribuem cargos por reação.
   - Lista de presentes com o tempo total conectado (formato `HH:MM:SS`).
   - Indicação caso algum presente não esteja mais com o cargo no momento do encerramento.
   - Lista de membros do cargo informado que não estiveram nos canais monitorados.
-#### `event stop "Nome do Evento"`
-- **Função:** encerra o evento e gera um relatório.
-- **Resultado:** o bot envia um embed com:
-  - Nome do evento e horários de início/fim.
-  - Lista de presentes com o tempo total conectado (formato `HH:MM:SS`).
-  - Lista de membros que não estiveram nos canais monitorados.
 - **Observação:** o relatório é enviado para o canal configurado em `defaultReportChannelId` ou, se vazio, no canal em que o comando foi executado.
 
 #### `event list`

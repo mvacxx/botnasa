@@ -2,10 +2,19 @@ require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
 const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelSelectMenuBuilder,
+  ChannelType,
   Client,
-  GatewayIntentBits,
-  Partials,
   EmbedBuilder,
+  GatewayIntentBits,
+  ModalBuilder,
+  Partials,
+  RoleSelectMenuBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require('discord.js');
 const EventManager = require('./eventManager');
 const ReactionRoleManager = require('./reactionRoleManager');
@@ -32,6 +41,7 @@ const client = new Client({
 
 const eventManager = new EventManager(client);
 const reactionRoleManager = new ReactionRoleManager(client);
+const eventCreationSessions = new Map();
 
 async function bootstrap() {
   await eventManager.init();
@@ -76,6 +86,90 @@ client.on('messageCreate', async (message) => {
   } catch (error) {
     console.error(error);
     await message.reply(`❌ Ocorreu um erro: ${error.message}`);
+  }
+});
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.inGuild()) return;
+
+  const isRelevantInteraction =
+    (typeof interaction.isButton === 'function' && interaction.isButton()) ||
+    (typeof interaction.isRoleSelectMenu === 'function' && interaction.isRoleSelectMenu()) ||
+    (typeof interaction.isChannelSelectMenu === 'function' && interaction.isChannelSelectMenu()) ||
+    (typeof interaction.isModalSubmit === 'function' && interaction.isModalSubmit());
+
+  if (!isRelevantInteraction) {
+    return;
+  }
+
+  const customId = interaction.customId || '';
+  if (!customId.startsWith('eventStart:')) {
+    return;
+  }
+
+  const [, action, sessionId] = customId.split(':');
+  const session = eventCreationSessions.get(sessionId);
+
+  if (!session) {
+    if (interaction.isRepliable()) {
+      await interaction.reply({
+        content: 'Esta configuração expirou. Use `!event start` novamente para criar um evento.',
+        ephemeral: true,
+      });
+    }
+    return;
+  }
+
+  if (interaction.user.id !== session.userId) {
+    if (interaction.isRepliable()) {
+      await interaction.reply({
+        content: 'Somente quem iniciou a configuração pode interagir com estes controles.',
+        ephemeral: true,
+      });
+    }
+    return;
+  }
+
+  if (Date.now() > session.expiresAt) {
+    eventCreationSessions.delete(session.id);
+    await disableSessionMessage(interaction.guild, session, 'Configuração expirada. Inicie novamente com `!event start`.');
+    if (interaction.isRepliable()) {
+      await interaction.reply({
+        content: 'Esta configuração expirou. Use `!event start` novamente para criar um evento.',
+        ephemeral: true,
+      });
+    }
+    return;
+  }
+
+  try {
+    switch (action) {
+      case 'setName':
+        await showEventNameModal(interaction, session);
+        break;
+      case 'role':
+        await handleRoleSelection(interaction, session);
+        break;
+      case 'channels':
+        await handleChannelSelection(interaction, session);
+        break;
+      case 'confirm':
+        await confirmEventCreation(interaction, session);
+        break;
+      case 'cancel':
+        await cancelEventCreation(interaction, session);
+        break;
+      case 'modal':
+        await handleEventNameSubmission(interaction, session);
+        break;
+      default:
+        break;
+    }
+  } catch (error) {
+    console.error('Erro ao lidar com interação do evento:', error);
+    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      await interaction.reply({ content: `❌ Ocorreu um erro: ${error.message}`, ephemeral: true });
+    }
   }
 });
 
@@ -127,7 +221,7 @@ async function handleEventCommand(message, args) {
 
 async function startEvent(message, args) {
   if (args.length < 3) {
-    await message.reply('Uso: `event start "Nome do Evento" <cargo> <canal...>`');
+    await startInteractiveEvent(message);
     return;
   }
 
@@ -230,6 +324,7 @@ async function handleHelpCommand(message) {
   const prefix = config.prefix;
   const lines = [
     '**Comandos disponíveis:**',
+    `• \`${prefix}event start\` — abre o assistente interativo para configurar um evento.`,
     `• \`${prefix}event start "Nome" @Cargo #Sala...\` — inicia o rastreamento de um evento.`,
     `• \`${prefix}event stop "Nome" @Cargo\` — encerra o evento e gera o relatório para o cargo informado.`,
     `• \`${prefix}event list\` — lista os eventos ativos.`,
@@ -321,6 +416,287 @@ async function handleWarnCommand(message, args) {
   if (channel.id !== message.channel.id) {
     await message.reply('Aviso enviado.');
   }
+}
+
+function generateSessionId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function startInteractiveEvent(message) {
+  const sessionId = generateSessionId();
+  const session = {
+    id: sessionId,
+    userId: message.author.id,
+    guildId: message.guild.id,
+    channelId: message.channel.id,
+    messageId: null,
+    eventName: '',
+    roleId: null,
+    channelIds: [],
+    createdAt: Date.now(),
+    expiresAt: Date.now() + 15 * 60 * 1000,
+  };
+
+  const reply = await message.reply({
+    content: `<@${session.userId}> vamos configurar o evento!`,
+    embeds: [buildEventSetupEmbed(session)],
+    components: buildEventSetupComponents(session),
+    allowedMentions: { users: [session.userId] },
+  });
+
+  session.messageId = reply.id;
+  eventCreationSessions.set(sessionId, session);
+}
+
+function buildEventSetupEmbed(session) {
+  const expiresTimestamp = Math.floor(session.expiresAt / 1000);
+  const roleValue = session.roleId ? `<@&${session.roleId}>` : 'Selecione um cargo monitorado.';
+  const channelValue = session.channelIds.length
+    ? session.channelIds.map((channelId) => `<#${channelId}>`).join(', ')
+    : 'Selecione pelo menos um canal de voz.';
+
+  return new EmbedBuilder()
+    .setTitle('Assistente de evento')
+    .setDescription(
+      `Defina o nome, cargo monitorado e canais de voz. Esta configuração expira <t:${expiresTimestamp}:R>. ` +
+        'Somente você pode interagir com estes controles.',
+    )
+    .addFields(
+      {
+        name: 'Nome do evento',
+        value: session.eventName ? `**${session.eventName}**` : 'Clique em **Definir nome** para informar o título do evento.',
+      },
+      { name: 'Cargo monitorado', value: roleValue },
+      { name: 'Canais monitorados', value: channelValue },
+    )
+    .setColor(0x5865f2)
+    .setTimestamp();
+}
+
+function buildEventSetupComponents(session) {
+  const rows = [];
+
+  const nameButton = new ButtonBuilder()
+    .setCustomId(`eventStart:setName:${session.id}`)
+    .setLabel(session.eventName ? 'Alterar nome' : 'Definir nome')
+    .setStyle(ButtonStyle.Primary);
+
+  const confirmButton = new ButtonBuilder()
+    .setCustomId(`eventStart:confirm:${session.id}`)
+    .setLabel('Iniciar evento')
+    .setStyle(ButtonStyle.Success)
+    .setDisabled(!session.eventName || !session.roleId || session.channelIds.length === 0);
+
+  const cancelButton = new ButtonBuilder()
+    .setCustomId(`eventStart:cancel:${session.id}`)
+    .setLabel('Cancelar')
+    .setStyle(ButtonStyle.Secondary);
+
+  rows.push(new ActionRowBuilder().addComponents(nameButton, confirmButton, cancelButton));
+
+  const roleSelect = new RoleSelectMenuBuilder()
+    .setCustomId(`eventStart:role:${session.id}`)
+    .setPlaceholder(session.roleId ? 'Cargo selecionado' : 'Selecione um cargo')
+    .setMinValues(1)
+    .setMaxValues(1);
+
+  if (session.roleId) {
+    roleSelect.setDefaultRoles([session.roleId]);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(roleSelect));
+
+  const channelSelect = new ChannelSelectMenuBuilder()
+    .setCustomId(`eventStart:channels:${session.id}`)
+    .setPlaceholder(
+      session.channelIds.length > 0 ? 'Canais selecionados' : 'Selecione um ou mais canais de voz',
+    )
+    .addChannelTypes(ChannelType.GuildVoice, ChannelType.GuildStageVoice)
+    .setMinValues(1)
+    .setMaxValues(10);
+
+  if (session.channelIds.length > 0) {
+    channelSelect.setDefaultChannels(session.channelIds);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(channelSelect));
+
+  return rows;
+}
+
+async function showEventNameModal(interaction, session) {
+  if (typeof interaction.showModal !== 'function') return;
+
+  const modal = new ModalBuilder().setCustomId(`eventStart:modal:${session.id}`).setTitle('Nome do evento');
+  const textInput = new TextInputBuilder()
+    .setCustomId('eventName')
+    .setLabel('Qual é o nome do evento?')
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(100)
+    .setRequired(true);
+
+  if (session.eventName) {
+    textInput.setValue(session.eventName);
+  }
+
+  modal.addComponents(new ActionRowBuilder().addComponents(textInput));
+  await interaction.showModal(modal);
+}
+
+async function handleEventNameSubmission(interaction, session) {
+  const eventName = interaction.fields.getTextInputValue('eventName').trim();
+  if (!eventName) {
+    await interaction.reply({ content: 'Informe um nome válido para o evento.', ephemeral: true });
+    return;
+  }
+
+  session.eventName = eventName;
+  session.updatedAt = Date.now();
+
+  const message = await fetchSessionMessage(interaction.guild, session);
+  if (message) {
+    await message.edit({
+      content: `<@${session.userId}> vamos configurar o evento!`,
+      embeds: [buildEventSetupEmbed(session)],
+      components: buildEventSetupComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await interaction.reply({ content: `Nome atualizado para **${eventName}**.`, ephemeral: true });
+}
+
+async function handleRoleSelection(interaction, session) {
+  const selected = interaction.values?.[0];
+  if (!selected) {
+    await interaction.reply({ content: 'Selecione um cargo válido.', ephemeral: true });
+    return;
+  }
+
+  session.roleId = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos configurar o evento!`,
+    embeds: [buildEventSetupEmbed(session)],
+    components: buildEventSetupComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function handleChannelSelection(interaction, session) {
+  const selected = interaction.values || [];
+  if (!selected.length) {
+    await interaction.reply({ content: 'Selecione pelo menos um canal de voz.', ephemeral: true });
+    return;
+  }
+
+  session.channelIds = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos configurar o evento!`,
+    embeds: [buildEventSetupEmbed(session)],
+    components: buildEventSetupComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function confirmEventCreation(interaction, session) {
+  if (!session.eventName || !session.roleId || session.channelIds.length === 0) {
+    await interaction.reply({
+      content: 'Defina nome, cargo monitorado e canais antes de iniciar o evento.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  try {
+    await eventManager.startEvent(
+      interaction.guild,
+      session.eventName,
+      session.roleId,
+      session.channelIds,
+      session.userId,
+    );
+  } catch (error) {
+    await interaction.reply({ content: `❌ Não foi possível iniciar: ${error.message}`, ephemeral: true });
+    return;
+  }
+
+  eventCreationSessions.delete(session.id);
+
+  const startedEmbed = new EmbedBuilder()
+    .setTitle(`Evento iniciado: ${session.eventName}`)
+    .setDescription('O rastreamento foi iniciado com sucesso.')
+    .addFields(
+      { name: 'Cargo monitorado', value: `<@&${session.roleId}>` },
+      { name: 'Canais', value: session.channelIds.map((channelId) => `<#${channelId}>`).join(', ') },
+    )
+    .setColor(0x57f287)
+    .setTimestamp(new Date());
+
+  await interaction.update({
+    content: `<@${session.userId}> evento iniciado!`,
+    embeds: [startedEmbed],
+    components: [],
+    allowedMentions: { users: [session.userId] },
+  });
+
+  if (typeof interaction.followUp === 'function') {
+    await interaction.followUp({
+      content: '✅ Evento iniciado com sucesso. Use `!event stop "Nome" @Cargo` quando terminar.',
+      ephemeral: true,
+    });
+  }
+}
+
+async function cancelEventCreation(interaction, session) {
+  eventCreationSessions.delete(session.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Configuração cancelada')
+    .setDescription('O assistente de criação de evento foi cancelado.')
+    .setColor(0xed4245)
+    .setTimestamp();
+
+  await interaction.update({
+    content: `<@${session.userId}> assistente cancelado.`,
+    embeds: [embed],
+    components: [],
+    allowedMentions: { users: [session.userId] },
+  });
+}
+
+async function disableSessionMessage(guild, session, reason) {
+  const message = await fetchSessionMessage(guild, session);
+  if (!message) return;
+
+  const embed = new EmbedBuilder()
+    .setTitle('Assistente encerrado')
+    .setDescription(reason)
+    .setColor(0xfaa61a)
+    .setTimestamp();
+
+  await message.edit({
+    content: `<@${session.userId}>`,
+    embeds: [embed],
+    components: [],
+    allowedMentions: { users: [session.userId] },
+  });
+}
+
+async function fetchSessionMessage(guild, session) {
+  if (!guild) return null;
+
+  const channel =
+    guild.channels.cache.get(session.channelId) || (await guild.channels.fetch(session.channelId).catch(() => null));
+  if (!channel || !channel.isTextBased()) {
+    return null;
+  }
+
+  const message = await channel.messages.fetch(session.messageId).catch(() => null);
+  return message;
 }
 
 bootstrap()
