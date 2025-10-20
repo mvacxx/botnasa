@@ -76,11 +76,15 @@ class EventManager {
     return event;
   }
 
-  async endEvent(guild, name) {
+  async endEvent(guild, name, roleIdToCheck) {
     const key = this._eventKey(guild.id, name);
     const event = this.activeEvents.get(key);
     if (!event) {
       throw new Error(`Não encontrei um evento ativo chamado "${name}".`);
+    }
+
+    if (!roleIdToCheck) {
+      throw new Error('Informe um cargo válido para encerrar o evento.');
     }
 
     const now = Date.now();
@@ -93,23 +97,36 @@ class EventManager {
     }
 
     await guild.members.fetch();
-    const role = guild.roles.cache.get(event.roleId);
+    const role = guild.roles.cache.get(roleIdToCheck);
     if (!role) {
-      throw new Error('O cargo configurado não está mais disponível.');
+      throw new Error('Não foi possível encontrar o cargo informado para verificação.');
     }
 
     const present = [];
-    const absent = [];
+    const presentIds = new Set();
 
+    for (const [memberId, attendance] of event.attendance.entries()) {
+      if (!attendance || attendance.totalMs <= 0) {
+        continue;
+      }
+
+      const member = guild.members.cache.get(memberId);
+      const displayName = member ? member.displayName : `ID ${memberId}`;
+      const hadRoleAtEnd = role.members.has(memberId);
+
+      present.push({
+        userId: memberId,
+        displayName,
+        totalMs: attendance.totalMs,
+        hadRoleAtEnd,
+      });
+
+      presentIds.add(memberId);
+    }
+
+    const absent = [];
     for (const [memberId, member] of role.members) {
-      const attendance = event.attendance.get(memberId);
-      if (attendance && attendance.totalMs > 0) {
-        present.push({
-          userId: memberId,
-          displayName: member.displayName,
-          totalMs: attendance.totalMs,
-        });
-      } else {
+      if (!presentIds.has(memberId)) {
         absent.push({
           userId: memberId,
           displayName: member.displayName,
@@ -122,12 +139,14 @@ class EventManager {
       startedAt: event.startedAt.toISOString(),
       endedAt: new Date(now).toISOString(),
       guildId: guild.id,
-      roleId: event.roleId,
+      roleId: role.id,
+      originalRoleId: event.roleId,
       present: present.map((entry) => ({
         userId: entry.userId,
         displayName: entry.displayName,
         totalMs: entry.totalMs,
         formattedDuration: formatDuration(entry.totalMs),
+        hadRoleAtEnd: entry.hadRoleAtEnd,
       })),
       absent: absent.map((entry) => ({
         userId: entry.userId,

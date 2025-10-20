@@ -15,6 +15,7 @@ Responsável por controlar o ciclo de vida dos eventos de presença.
 
 - **startEvent(guild, name, roleId, channelIds, startedBy):** cria um evento ativo para um cargo e uma lista de salas de voz. Todos os membros que já estiverem conectados aos canais de voz monitorados terão seu tempo contabilizado a partir do momento de criação.
 - **handleVoiceUpdate(oldState, newState):** ouve as mudanças de voz dos usuários e registra automaticamente o tempo conectado para cada evento ativo. Usuários precisam possuir o cargo monitorado para terem o tempo registrado.
+- **endEvent(guild, name, roleIdToCheck):** encerra o evento, calcula o tempo total dos participantes, identifica quem faltou entre os membros do cargo informado no encerramento e salva um histórico em `data/events.json`.
 - **endEvent(guild, name):** encerra o evento, calcula o tempo total dos participantes, identifica quem faltou (membros do cargo que não tiveram tempo registrado) e salva um histórico em `data/events.json`.
 - **listActive():** retorna uma lista dos eventos ativos com cargo, canais monitorados e horário de início.
 
@@ -38,6 +39,13 @@ Cuida das mensagens que atribuem cargos por reação.
   - `<canal ...>`: um ou mais canais de voz (menção `#Sala` ou ID) que serão observados.
 - **Comportamento:** valida os canais informados, ativa o evento e começa a contabilizar o tempo de todos os membros do cargo que entrarem nas salas.
 
+#### `event stop "Nome do Evento" <cargo>`
+- **Função:** encerra o evento e gera um relatório usando o cargo informado para verificar quem faltou.
+- **Resultado:** o bot envia um embed com:
+  - Nome do evento e horários de início/fim.
+  - Lista de presentes com o tempo total conectado (formato `HH:MM:SS`).
+  - Indicação caso algum presente não esteja mais com o cargo no momento do encerramento.
+  - Lista de membros do cargo informado que não estiveram nos canais monitorados.
 #### `event stop "Nome do Evento"`
 - **Função:** encerra o evento e gera um relatório.
 - **Resultado:** o bot envia um embed com:
@@ -48,6 +56,9 @@ Cuida das mensagens que atribuem cargos por reação.
 
 #### `event list`
 - **Função:** mostra os eventos atualmente ativos no servidor, incluindo cargo monitorado, canais observados e horário de início.
+
+#### `help`
+- **Função:** lista rapidamente todos os comandos disponíveis e um resumo do uso esperado.
 
 #### `reaction-role create <canal> <emoji> <cargo> "Mensagem"`
 - **Função:** cria uma mensagem interativa para autoatribuição de cargo.

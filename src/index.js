@@ -65,8 +65,13 @@ client.on('messageCreate', async (message) => {
       case 'warn':
         await handleWarnCommand(message, rest);
         break;
+      case 'help':
+        await handleHelpCommand(message);
+        break;
       default:
-        await message.reply('Comando não reconhecido.');
+        await message.reply(
+          `Comando não reconhecido. Use \`${config.prefix}help\` para ver a lista de comandos disponíveis.`,
+        );
     }
   } catch (error) {
     console.error(error);
@@ -148,13 +153,26 @@ async function startEvent(message, args) {
 }
 
 async function stopEvent(message, args) {
-  if (args.length < 1) {
-    await message.reply('Uso: `event stop "Nome do Evento"`');
+  if (args.length < 2) {
+    await message.reply('Uso: `event stop "Nome do Evento" <cargo>`');
     return;
   }
 
-  const eventName = args.join(' ');
-  const { summary, present, absent } = await eventManager.endEvent(message.guild, eventName);
+  const roleArgument = args.pop();
+  const roleId = extractId(roleArgument);
+  const eventName = args.join(' ').trim();
+
+  if (!eventName) {
+    await message.reply('Informe o nome do evento entre aspas. Ex: `event stop "Nome do Evento" <cargo>`');
+    return;
+  }
+
+  if (!roleId) {
+    await message.reply('Informe um cargo válido para verificar as presenças.');
+    return;
+  }
+
+  const { summary, present, absent } = await eventManager.endEvent(message.guild, eventName, roleId);
 
   const embed = new EmbedBuilder()
     .setTitle(`Relatório do evento: ${summary.eventName}`)
@@ -164,7 +182,10 @@ async function stopEvent(message, args) {
         name: `Presentes (${present.length})`,
         value: present.length > 0
           ? present
-              .map((entry) => `• ${entry.displayName} — ${formatDuration(entry.totalMs)}`)
+              .map((entry) => {
+                const suffix = entry.hadRoleAtEnd ? '' : ' _(sem o cargo no encerramento)_';
+                return `• ${entry.displayName} — ${formatDuration(entry.totalMs)}${suffix}`;
+              })
               .join('\n')
           : 'Nenhum membro com o cargo participou.',
       },
@@ -176,6 +197,13 @@ async function stopEvent(message, args) {
       },
     )
     .setTimestamp(new Date(summary.endedAt));
+
+  if (summary.originalRoleId && summary.originalRoleId !== summary.roleId) {
+    embed.addFields({
+      name: 'Cargo monitorado no início',
+      value: `<@&${summary.originalRoleId}>`,
+    });
+  }
 
   const targetChannelId = config.defaultReportChannelId || message.channelId;
   const targetChannel = message.guild.channels.cache.get(targetChannelId) || message.channel;
@@ -194,6 +222,21 @@ async function listEvents(message) {
     const channels = event.channelIds.map((id) => `<#${id}>`).join(', ');
     return `• **${event.name}** — Cargo: <@&${event.roleId}> — Canais: ${channels} — Iniciado em <t:${started}:f>`;
   });
+
+  await message.reply(lines.join('\n'));
+}
+
+async function handleHelpCommand(message) {
+  const prefix = config.prefix;
+  const lines = [
+    '**Comandos disponíveis:**',
+    `• \`${prefix}event start "Nome" @Cargo #Sala...\` — inicia o rastreamento de um evento.`,
+    `• \`${prefix}event stop "Nome" @Cargo\` — encerra o evento e gera o relatório para o cargo informado.`,
+    `• \`${prefix}event list\` — lista os eventos ativos.`,
+    `• \`${prefix}reaction-role create #canal 😃 @Cargo "Mensagem"\` — cria atribuição de cargo por reação.`,
+    `• \`${prefix}reaction-role remove <messageId>\` — remove a atribuição de cargo por reação.`,
+    `• \`${prefix}warn #canal "Mensagem"\` — envia um aviso para o canal informado.`,
+  ];
 
   await message.reply(lines.join('\n'));
 }
