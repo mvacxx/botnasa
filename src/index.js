@@ -13,6 +13,8 @@ const {
   ModalBuilder,
   Partials,
   RoleSelectMenuBuilder,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
   TextInputBuilder,
   TextInputStyle,
 } = require('discord.js');
@@ -42,6 +44,9 @@ const client = new Client({
 const eventManager = new EventManager(client);
 const reactionRoleManager = new ReactionRoleManager(client);
 const eventCreationSessions = new Map();
+const eventStopSessions = new Map();
+const warnSessions = new Map();
+const reactionRoleSessions = new Map();
 
 async function bootstrap() {
   await eventManager.init();
@@ -96,6 +101,7 @@ client.on('interactionCreate', async (interaction) => {
     (typeof interaction.isButton === 'function' && interaction.isButton()) ||
     (typeof interaction.isRoleSelectMenu === 'function' && interaction.isRoleSelectMenu()) ||
     (typeof interaction.isChannelSelectMenu === 'function' && interaction.isChannelSelectMenu()) ||
+    (typeof interaction.isStringSelectMenu === 'function' && interaction.isStringSelectMenu()) ||
     (typeof interaction.isModalSubmit === 'function' && interaction.isModalSubmit());
 
   if (!isRelevantInteraction) {
@@ -103,70 +109,19 @@ client.on('interactionCreate', async (interaction) => {
   }
 
   const customId = interaction.customId || '';
-  if (!customId.startsWith('eventStart:')) {
-    return;
-  }
-
-  const [, action, sessionId] = customId.split(':');
-  const session = eventCreationSessions.get(sessionId);
-
-  if (!session) {
-    if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: 'Esta configuração expirou. Use `!event start` novamente para criar um evento.',
-        ephemeral: true,
-      });
-    }
-    return;
-  }
-
-  if (interaction.user.id !== session.userId) {
-    if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: 'Somente quem iniciou a configuração pode interagir com estes controles.',
-        ephemeral: true,
-      });
-    }
-    return;
-  }
-
-  if (Date.now() > session.expiresAt) {
-    eventCreationSessions.delete(session.id);
-    await disableSessionMessage(interaction.guild, session, 'Configuração expirada. Inicie novamente com `!event start`.');
-    if (interaction.isRepliable()) {
-      await interaction.reply({
-        content: 'Esta configuração expirou. Use `!event start` novamente para criar um evento.',
-        ephemeral: true,
-      });
-    }
-    return;
-  }
 
   try {
-    switch (action) {
-      case 'setName':
-        await showEventNameModal(interaction, session);
-        break;
-      case 'role':
-        await handleRoleSelection(interaction, session);
-        break;
-      case 'channels':
-        await handleChannelSelection(interaction, session);
-        break;
-      case 'confirm':
-        await confirmEventCreation(interaction, session);
-        break;
-      case 'cancel':
-        await cancelEventCreation(interaction, session);
-        break;
-      case 'modal':
-        await handleEventNameSubmission(interaction, session);
-        break;
-      default:
-        break;
+    if (customId.startsWith('eventStart:')) {
+      await handleEventStartInteraction(interaction);
+    } else if (customId.startsWith('eventStop:')) {
+      await handleEventStopInteraction(interaction);
+    } else if (customId.startsWith('warn:')) {
+      await handleWarnInteraction(interaction);
+    } else if (customId.startsWith('reactionRoleCreate:')) {
+      await handleReactionRoleCreationInteraction(interaction);
     }
   } catch (error) {
-    console.error('Erro ao lidar com interação do evento:', error);
+    console.error('Erro ao lidar com interação:', error);
     if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
       await interaction.reply({ content: `❌ Ocorreu um erro: ${error.message}`, ephemeral: true });
     }
@@ -248,7 +203,7 @@ async function startEvent(message, args) {
 
 async function stopEvent(message, args) {
   if (args.length < 2) {
-    await message.reply('Uso: `event stop "Nome do Evento" <cargo>`');
+    await startInteractiveEventStop(message);
     return;
   }
 
@@ -266,42 +221,11 @@ async function stopEvent(message, args) {
     return;
   }
 
-  const { summary, present, absent } = await eventManager.endEvent(message.guild, eventName, roleId);
+  const { targetChannel } = await endEventAndSendReport(message.guild, message.channelId, eventName, roleId);
 
-  const embed = new EmbedBuilder()
-    .setTitle(`Relatório do evento: ${summary.eventName}`)
-    .setDescription(`Início: <t:${Math.floor(new Date(summary.startedAt).getTime() / 1000)}:f>\nFim: <t:${Math.floor(new Date(summary.endedAt).getTime() / 1000)}:f>`)
-    .addFields(
-      {
-        name: `Presentes (${present.length})`,
-        value: present.length > 0
-          ? present
-              .map((entry) => {
-                const suffix = entry.hadRoleAtEnd ? '' : ' _(sem o cargo no encerramento)_';
-                return `• ${entry.displayName} — ${formatDuration(entry.totalMs)}${suffix}`;
-              })
-              .join('\n')
-          : 'Nenhum membro com o cargo participou.',
-      },
-      {
-        name: `Faltas (${absent.length})`,
-        value: absent.length > 0
-          ? absent.map((entry) => `• ${entry.displayName}`).join('\n')
-          : 'Todos os membros com o cargo participaram.',
-      },
-    )
-    .setTimestamp(new Date(summary.endedAt));
-
-  if (summary.originalRoleId && summary.originalRoleId !== summary.roleId) {
-    embed.addFields({
-      name: 'Cargo monitorado no início',
-      value: `<@&${summary.originalRoleId}>`,
-    });
+  if (targetChannel.id !== message.channel.id) {
+    await message.reply(`Relatório enviado para <#${targetChannel.id}>.`);
   }
-
-  const targetChannelId = config.defaultReportChannelId || message.channelId;
-  const targetChannel = message.guild.channels.cache.get(targetChannelId) || message.channel;
-  await targetChannel.send({ embeds: [embed] });
 }
 
 async function listEvents(message) {
@@ -320,16 +244,124 @@ async function listEvents(message) {
   await message.reply(lines.join('\n'));
 }
 
+async function endEventAndSendReport(guild, fallbackChannelId, eventName, roleId) {
+  const { summary, present, absent } = await eventManager.endEvent(guild, eventName, roleId);
+  const embed = buildEventReportEmbed(summary, present, absent);
+
+  let targetChannel = null;
+  if (config.defaultReportChannelId) {
+    targetChannel =
+      guild.channels.cache.get(config.defaultReportChannelId) ||
+      (await guild.channels.fetch(config.defaultReportChannelId).catch(() => null));
+  }
+
+  if (!targetChannel || !targetChannel.isTextBased()) {
+    targetChannel =
+      guild.channels.cache.get(fallbackChannelId) ||
+      (await guild.channels.fetch(fallbackChannelId).catch(() => null));
+  }
+
+  if (!targetChannel || !targetChannel.isTextBased()) {
+    throw new Error('Não foi possível encontrar um canal de texto para enviar o relatório.');
+  }
+
+  await targetChannel.send({ embeds: [embed] });
+
+  return { summary, present, absent, embed, targetChannel };
+}
+
+function buildEventReportEmbed(summary, present, absent) {
+  const embed = new EmbedBuilder()
+    .setTitle(`Relatório do evento: ${summary.eventName}`)
+    .setDescription(
+      `Início: <t:${Math.floor(new Date(summary.startedAt).getTime() / 1000)}:f>\n` +
+        `Fim: <t:${Math.floor(new Date(summary.endedAt).getTime() / 1000)}:f>`,
+    )
+    .addFields(
+      {
+        name: `Presentes (${present.length})`,
+        value:
+          present.length > 0
+            ? present
+                .map((entry) => {
+                  const suffix = entry.hadRoleAtEnd ? '' : ' _(sem o cargo no encerramento)_';
+                  return `• ${entry.displayName} — ${formatDuration(entry.totalMs)}${suffix}`;
+                })
+                .join('\n')
+            : 'Nenhum membro com o cargo participou.',
+      },
+      {
+        name: `Faltas (${absent.length})`,
+        value:
+          absent.length > 0
+            ? absent.map((entry) => `• ${entry.displayName}`).join('\n')
+            : 'Todos os membros com o cargo participaram.',
+      },
+    )
+    .setTimestamp(new Date(summary.endedAt));
+
+  if (summary.originalRoleId && summary.originalRoleId !== summary.roleId) {
+    embed.addFields({ name: 'Cargo monitorado no início', value: `<@&${summary.originalRoleId}>` });
+  }
+
+  return embed;
+}
+
+async function handleEventStartInteraction(interaction) {
+  const [, action, sessionId] = interaction.customId.split(':');
+  const session = eventCreationSessions.get(sessionId);
+
+  const ok = await ensureInteractiveSession(interaction, session, eventCreationSessions, {
+    restartHint: 'Use `!event start` novamente para criar um evento.',
+  });
+  if (!ok) {
+    return;
+  }
+
+  try {
+    switch (action) {
+      case 'setName':
+        await showEventNameModal(interaction, session);
+        break;
+      case 'role':
+        await handleRoleSelection(interaction, session);
+        break;
+      case 'channels':
+        await handleChannelSelection(interaction, session);
+        break;
+      case 'confirm':
+        await confirmEventCreation(interaction, session);
+        break;
+      case 'cancel':
+        await cancelEventCreation(interaction, session);
+        break;
+      case 'modal':
+        await handleEventNameSubmission(interaction, session);
+        break;
+      default:
+        break;
+    }
+  } catch (error) {
+    console.error('Erro ao lidar com interação do evento:', error);
+    if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
+      await interaction.reply({ content: `❌ Ocorreu um erro: ${error.message}`, ephemeral: true });
+    }
+  }
+}
+
 async function handleHelpCommand(message) {
   const prefix = config.prefix;
   const lines = [
     '**Comandos disponíveis:**',
     `• \`${prefix}event start\` — abre o assistente interativo para configurar um evento.`,
     `• \`${prefix}event start "Nome" @Cargo #Sala...\` — inicia o rastreamento de um evento.`,
+    `• \`${prefix}event stop\` — abre o assistente interativo para encerrar um evento ativo.`,
     `• \`${prefix}event stop "Nome" @Cargo\` — encerra o evento e gera o relatório para o cargo informado.`,
     `• \`${prefix}event list\` — lista os eventos ativos.`,
+    `• \`${prefix}reaction-role create\` — abre o assistente para publicar mensagem com cargo por reação.`,
     `• \`${prefix}reaction-role create #canal 😃 @Cargo "Mensagem"\` — cria atribuição de cargo por reação.`,
     `• \`${prefix}reaction-role remove <messageId>\` — remove a atribuição de cargo por reação.`,
+    `• \`${prefix}warn\` — abre o assistente para enviar um aviso.`,
     `• \`${prefix}warn #canal "Mensagem"\` — envia um aviso para o canal informado.`,
   ];
 
@@ -357,7 +389,7 @@ async function handleReactionRoleCommand(message, args) {
 
 async function createReactionRole(message, args) {
   if (args.length < 4) {
-    await message.reply('Uso: `reaction-role create <canal> <emoji> <cargo> "Mensagem"`');
+    await startInteractiveReactionRoleCreation(message);
     return;
   }
 
@@ -400,7 +432,7 @@ async function removeReactionRole(message, args) {
 
 async function handleWarnCommand(message, args) {
   if (args.length < 2) {
-    await message.reply('Uso: `warn <canal> "Mensagem"`');
+    await startInteractiveWarn(message);
     return;
   }
 
@@ -666,6 +698,894 @@ async function cancelEventCreation(interaction, session) {
     components: [],
     allowedMentions: { users: [session.userId] },
   });
+}
+
+async function startInteractiveEventStop(message) {
+  const events = eventManager.listActive().filter((event) => event.guildId === message.guild.id);
+  if (events.length === 0) {
+    await message.reply('Não há eventos ativos para encerrar neste servidor.');
+    return;
+  }
+
+  if (events.length > 25) {
+    await message.reply(
+      'Há muitos eventos ativos para listar aqui. Use `!event stop "Nome" @Cargo` informando o evento manualmente.',
+    );
+    return;
+  }
+
+  const sessionId = generateSessionId();
+  const session = {
+    id: sessionId,
+    userId: message.author.id,
+    guildId: message.guild.id,
+    channelId: message.channel.id,
+    messageId: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    expiresAt: Date.now() + 15 * 60 * 1000,
+    events,
+    selectedEventIndex: null,
+    roleId: null,
+  };
+
+  const reply = await message.reply({
+    content: `<@${session.userId}> vamos encerrar um evento ativo.`,
+    embeds: [buildEventStopEmbed(session)],
+    components: buildEventStopComponents(session),
+    allowedMentions: { users: [] },
+  });
+
+  session.messageId = reply.id;
+  eventStopSessions.set(session.id, session);
+}
+
+function buildEventStopEmbed(session) {
+  const embed = new EmbedBuilder()
+    .setTitle('Encerrar evento')
+    .setDescription('Selecione o evento ativo e o cargo para gerar o relatório de presença.')
+    .setColor(0x5865f2)
+    .setTimestamp(new Date());
+
+  const selectedEvent =
+    session.selectedEventIndex !== null ? session.events[session.selectedEventIndex] : null;
+  embed.addFields(
+    {
+      name: 'Evento selecionado',
+      value: selectedEvent ? `**${selectedEvent.name}**` : 'Nenhum evento selecionado.',
+    },
+    {
+      name: 'Cargo para verificar presenças',
+      value: session.roleId ? `<@&${session.roleId}>` : 'Nenhum cargo selecionado.',
+    },
+  );
+
+  if (selectedEvent) {
+    const channels = selectedEvent.channelIds.map((id) => `<#${id}>`).join(', ');
+    embed.addFields({ name: 'Canais monitorados', value: channels || 'Nenhum canal registrado.' });
+  }
+
+  return embed;
+}
+
+function buildEventStopComponents(session) {
+  const rows = [];
+
+  const eventSelect = new StringSelectMenuBuilder()
+    .setCustomId(`eventStop:event:${session.id}`)
+    .setPlaceholder('Selecione o evento a encerrar')
+    .setMinValues(1)
+    .setMaxValues(1);
+
+  session.events.forEach((event, index) => {
+    const option = new StringSelectMenuOptionBuilder()
+      .setLabel(event.name.length > 100 ? `${event.name.slice(0, 97)}...` : event.name)
+      .setValue(String(index));
+
+    const descriptionParts = [];
+    descriptionParts.push(event.roleId ? 'Cargo monitorado definido' : 'Cargo original desconhecido');
+    descriptionParts.push(`Salas: ${event.channelIds.length}`);
+    option.setDescription(descriptionParts.join(' | ').slice(0, 100));
+
+    if (session.selectedEventIndex === index) {
+      option.setDefault(true);
+    }
+
+    eventSelect.addOptions(option);
+  });
+
+  rows.push(new ActionRowBuilder().addComponents(eventSelect));
+
+  const roleSelect = new RoleSelectMenuBuilder()
+    .setCustomId(`eventStop:role:${session.id}`)
+    .setPlaceholder('Selecione o cargo para verificar as presenças')
+    .setMinValues(1)
+    .setMaxValues(1);
+
+  if (session.roleId) {
+    roleSelect.setDefaultRoles([session.roleId]);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(roleSelect));
+
+  const buttons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`eventStop:confirm:${session.id}`)
+      .setLabel('Encerrar evento')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`eventStop:cancel:${session.id}`)
+      .setLabel('Cancelar')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  rows.push(buttons);
+
+  return rows;
+}
+
+async function handleEventStopInteraction(interaction) {
+  const [, action, sessionId] = interaction.customId.split(':');
+  const session = eventStopSessions.get(sessionId);
+
+  const ok = await ensureInteractiveSession(interaction, session, eventStopSessions, {
+    restartHint: 'Use `!event stop` novamente para encerrar um evento.',
+  });
+  if (!ok) {
+    return;
+  }
+
+  switch (action) {
+    case 'event':
+      await handleEventStopSelection(interaction, session);
+      break;
+    case 'role':
+      await handleEventStopRoleSelection(interaction, session);
+      break;
+    case 'confirm':
+      await confirmEventStop(interaction, session);
+      break;
+    case 'cancel':
+      await cancelEventStop(interaction, session);
+      break;
+    default:
+      break;
+  }
+}
+
+async function handleEventStopSelection(interaction, session) {
+  const value = interaction.values?.[0];
+  const index = Number(value);
+  if (!Number.isInteger(index) || index < 0 || index >= session.events.length) {
+    await interaction.reply({ content: 'Selecione um evento válido.', ephemeral: true });
+    return;
+  }
+
+  session.selectedEventIndex = index;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos encerrar um evento ativo.`,
+    embeds: [buildEventStopEmbed(session)],
+    components: buildEventStopComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function handleEventStopRoleSelection(interaction, session) {
+  const selected = interaction.values?.[0];
+  if (!selected) {
+    await interaction.reply({ content: 'Selecione um cargo válido.', ephemeral: true });
+    return;
+  }
+
+  session.roleId = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos encerrar um evento ativo.`,
+    embeds: [buildEventStopEmbed(session)],
+    components: buildEventStopComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function confirmEventStop(interaction, session) {
+  const selectedEvent =
+    session.selectedEventIndex !== null ? session.events[session.selectedEventIndex] : null;
+  if (!selectedEvent) {
+    await interaction.reply({ content: 'Selecione um evento antes de confirmar.', ephemeral: true });
+    return;
+  }
+
+  if (!session.roleId) {
+    await interaction.reply({ content: 'Escolha um cargo para verificar as presenças.', ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const { targetChannel } = await endEventAndSendReport(
+      interaction.guild,
+      session.channelId,
+      selectedEvent.name,
+      session.roleId,
+    );
+
+    eventStopSessions.delete(session.id);
+
+    const embed = new EmbedBuilder()
+      .setTitle('Evento encerrado')
+      .setDescription(`O evento **${selectedEvent.name}** foi encerrado e o relatório foi publicado.`)
+      .addFields(
+        { name: 'Cargo verificado', value: `<@&${session.roleId}>` },
+        { name: 'Relatório', value: `<#${targetChannel.id}>` },
+      )
+      .setColor(0x57f287)
+      .setTimestamp(new Date());
+
+    await interaction.message.edit({
+      content: `<@${session.userId}> evento encerrado.`,
+      embeds: [embed],
+      components: [],
+      allowedMentions: { users: [session.userId] },
+    });
+
+    const acknowledgement =
+      targetChannel.id === session.channelId
+        ? '✅ Evento encerrado e relatório publicado nesta sala.'
+        : `✅ Evento encerrado. O relatório foi publicado em <#${targetChannel.id}>.`;
+
+    await interaction.editReply({ content: acknowledgement });
+  } catch (error) {
+    console.error('Erro ao encerrar evento interativamente:', error);
+    await interaction.editReply({ content: `❌ Não foi possível encerrar o evento: ${error.message}` });
+  }
+}
+
+async function cancelEventStop(interaction, session) {
+  eventStopSessions.delete(session.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Encerramento cancelado')
+    .setDescription('O assistente para encerrar o evento foi cancelado.')
+    .setColor(0xed4245)
+    .setTimestamp(new Date());
+
+  await interaction.update({
+    content: `<@${session.userId}> assistente cancelado.`,
+    embeds: [embed],
+    components: [],
+    allowedMentions: { users: [session.userId] },
+  });
+}
+
+async function startInteractiveWarn(message) {
+  const sessionId = generateSessionId();
+  const session = {
+    id: sessionId,
+    userId: message.author.id,
+    guildId: message.guild.id,
+    channelId: message.channel.id,
+    messageId: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    expiresAt: Date.now() + 10 * 60 * 1000,
+    targetChannelId: null,
+    messageContent: '',
+  };
+
+  const reply = await message.reply({
+    content: `<@${session.userId}> vamos preparar um aviso.`,
+    embeds: [buildWarnEmbed(session)],
+    components: buildWarnComponents(session),
+    allowedMentions: { users: [] },
+  });
+
+  session.messageId = reply.id;
+  warnSessions.set(session.id, session);
+}
+
+function buildWarnEmbed(session) {
+  const embed = new EmbedBuilder()
+    .setTitle('Enviar aviso')
+    .setDescription('Escolha o canal e defina a mensagem que será enviada.')
+    .setColor(0x5865f2)
+    .setTimestamp(new Date());
+
+  embed.addFields(
+    {
+      name: 'Canal alvo',
+      value: session.targetChannelId ? `<#${session.targetChannelId}>` : 'Nenhum canal selecionado.',
+    },
+    {
+      name: 'Mensagem',
+      value: session.messageContent ? session.messageContent.slice(0, 1024) : 'Nenhuma mensagem definida.',
+    },
+  );
+
+  return embed;
+}
+
+function buildWarnComponents(session) {
+  const rows = [];
+
+  const channelSelect = new ChannelSelectMenuBuilder()
+    .setCustomId(`warn:channel:${session.id}`)
+    .setPlaceholder('Selecione o canal para enviar o aviso')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement);
+
+  if (session.targetChannelId) {
+    channelSelect.setDefaultChannels([session.targetChannelId]);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(channelSelect));
+
+  const actionButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`warn:setMessage:${session.id}`)
+      .setLabel('Editar mensagem')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`warn:confirm:${session.id}`)
+      .setLabel('Enviar aviso')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`warn:cancel:${session.id}`)
+      .setLabel('Cancelar')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  rows.push(actionButtons);
+
+  return rows;
+}
+
+async function handleWarnInteraction(interaction) {
+  const [, action, sessionId] = interaction.customId.split(':');
+  const session = warnSessions.get(sessionId);
+
+  const ok = await ensureInteractiveSession(interaction, session, warnSessions, {
+    restartHint: 'Use `!warn` novamente para enviar um aviso.',
+  });
+  if (!ok) {
+    return;
+  }
+
+  switch (action) {
+    case 'channel':
+      await handleWarnChannelSelection(interaction, session);
+      break;
+    case 'setMessage':
+      await showWarnMessageModal(interaction, session);
+      break;
+    case 'confirm':
+      await confirmWarn(interaction, session);
+      break;
+    case 'cancel':
+      await cancelWarn(interaction, session);
+      break;
+    case 'modal':
+      await handleWarnMessageSubmission(interaction, session);
+      break;
+    default:
+      break;
+  }
+}
+
+async function handleWarnChannelSelection(interaction, session) {
+  const selected = interaction.values?.[0];
+  if (!selected) {
+    await interaction.reply({ content: 'Selecione um canal válido.', ephemeral: true });
+    return;
+  }
+
+  session.targetChannelId = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos preparar um aviso.`,
+    embeds: [buildWarnEmbed(session)],
+    components: buildWarnComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function showWarnMessageModal(interaction, session) {
+  if (typeof interaction.showModal !== 'function') return;
+
+  const modal = new ModalBuilder().setCustomId(`warn:modal:${session.id}`).setTitle('Mensagem do aviso');
+  const textInput = new TextInputBuilder()
+    .setCustomId('warnMessage')
+    .setLabel('Qual mensagem deseja enviar?')
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true)
+    .setMaxLength(1500);
+
+  if (session.messageContent) {
+    textInput.setValue(session.messageContent);
+  }
+
+  modal.addComponents(new ActionRowBuilder().addComponents(textInput));
+  await interaction.showModal(modal);
+}
+
+async function handleWarnMessageSubmission(interaction, session) {
+  const messageContent = interaction.fields.getTextInputValue('warnMessage').trim();
+  if (!messageContent) {
+    await interaction.reply({ content: 'Informe uma mensagem válida.', ephemeral: true });
+    return;
+  }
+
+  session.messageContent = messageContent;
+  session.updatedAt = Date.now();
+
+  const message = await fetchSessionMessage(interaction.guild, session);
+  if (message) {
+    await message.edit({
+      content: `<@${session.userId}> vamos preparar um aviso.`,
+      embeds: [buildWarnEmbed(session)],
+      components: buildWarnComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await interaction.reply({ content: 'Mensagem atualizada.', ephemeral: true });
+}
+
+async function confirmWarn(interaction, session) {
+  if (!session.targetChannelId) {
+    await interaction.reply({ content: 'Selecione um canal antes de enviar o aviso.', ephemeral: true });
+    return;
+  }
+
+  if (!session.messageContent) {
+    await interaction.reply({ content: 'Defina a mensagem do aviso antes de enviar.', ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const channel =
+      interaction.guild.channels.cache.get(session.targetChannelId) ||
+      (await interaction.guild.channels.fetch(session.targetChannelId).catch(() => null));
+
+    if (!channel || !channel.isTextBased()) {
+      throw new Error('Não foi possível acessar o canal selecionado.');
+    }
+
+    await channel.send({ content: session.messageContent });
+
+    warnSessions.delete(session.id);
+
+    const embed = new EmbedBuilder()
+      .setTitle('Aviso enviado')
+      .setDescription('O aviso foi enviado com sucesso.')
+      .addFields({ name: 'Canal', value: `<#${channel.id}>` })
+      .setColor(0x57f287)
+      .setTimestamp(new Date());
+
+    await interaction.message.edit({
+      content: `<@${session.userId}> aviso enviado.`,
+      embeds: [embed],
+      components: [],
+      allowedMentions: { users: [session.userId] },
+    });
+
+    await interaction.editReply({ content: '✅ Aviso publicado com sucesso.' });
+  } catch (error) {
+    console.error('Erro ao enviar aviso interativamente:', error);
+    await interaction.editReply({ content: `❌ Não foi possível enviar o aviso: ${error.message}` });
+  }
+}
+
+async function cancelWarn(interaction, session) {
+  warnSessions.delete(session.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Envio cancelado')
+    .setDescription('O assistente de aviso foi cancelado.')
+    .setColor(0xed4245)
+    .setTimestamp(new Date());
+
+  await interaction.update({
+    content: `<@${session.userId}> assistente cancelado.`,
+    embeds: [embed],
+    components: [],
+    allowedMentions: { users: [session.userId] },
+  });
+}
+
+async function startInteractiveReactionRoleCreation(message) {
+  const sessionId = generateSessionId();
+  const session = {
+    id: sessionId,
+    userId: message.author.id,
+    guildId: message.guild.id,
+    channelId: message.channel.id,
+    messageId: null,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    expiresAt: Date.now() + 15 * 60 * 1000,
+    targetChannelId: null,
+    roleId: null,
+    emoji: '',
+    messageContent: '',
+  };
+
+  const reply = await message.reply({
+    content: `<@${session.userId}> vamos configurar a reação com cargo.`,
+    embeds: [buildReactionRoleEmbed(session)],
+    components: buildReactionRoleComponents(session),
+    allowedMentions: { users: [] },
+  });
+
+  session.messageId = reply.id;
+  reactionRoleSessions.set(session.id, session);
+}
+
+function buildReactionRoleEmbed(session) {
+  const embed = new EmbedBuilder()
+    .setTitle('Criar cargo por reação')
+    .setDescription('Informe o canal, a mensagem, o emoji e o cargo que será atribuído.')
+    .setColor(0x5865f2)
+    .setTimestamp(new Date());
+
+  embed.addFields(
+    { name: 'Canal', value: session.targetChannelId ? `<#${session.targetChannelId}>` : 'Nenhum canal selecionado.' },
+    { name: 'Cargo', value: session.roleId ? `<@&${session.roleId}>` : 'Nenhum cargo selecionado.' },
+    { name: 'Emoji', value: session.emoji || 'Nenhum emoji definido.' },
+    {
+      name: 'Mensagem',
+      value: session.messageContent ? session.messageContent.slice(0, 1024) : 'Nenhuma mensagem definida.',
+    },
+  );
+
+  return embed;
+}
+
+function buildReactionRoleComponents(session) {
+  const rows = [];
+
+  const channelSelect = new ChannelSelectMenuBuilder()
+    .setCustomId(`reactionRoleCreate:channel:${session.id}`)
+    .setPlaceholder('Selecione o canal da mensagem')
+    .setMinValues(1)
+    .setMaxValues(1)
+    .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement);
+
+  if (session.targetChannelId) {
+    channelSelect.setDefaultChannels([session.targetChannelId]);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(channelSelect));
+
+  const roleSelect = new RoleSelectMenuBuilder()
+    .setCustomId(`reactionRoleCreate:role:${session.id}`)
+    .setPlaceholder('Selecione o cargo que será atribuído')
+    .setMinValues(1)
+    .setMaxValues(1);
+
+  if (session.roleId) {
+    roleSelect.setDefaultRoles([session.roleId]);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(roleSelect));
+
+  const configureButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`reactionRoleCreate:setEmoji:${session.id}`)
+      .setLabel('Definir emoji')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`reactionRoleCreate:setMessage:${session.id}`)
+      .setLabel('Editar mensagem')
+      .setStyle(ButtonStyle.Primary),
+  );
+
+  rows.push(configureButtons);
+
+  const confirmButtons = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`reactionRoleCreate:confirm:${session.id}`)
+      .setLabel('Criar')
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`reactionRoleCreate:cancel:${session.id}`)
+      .setLabel('Cancelar')
+      .setStyle(ButtonStyle.Secondary),
+  );
+
+  rows.push(confirmButtons);
+
+  return rows;
+}
+
+async function handleReactionRoleCreationInteraction(interaction) {
+  const [, action, sessionId] = interaction.customId.split(':');
+  const session = reactionRoleSessions.get(sessionId);
+
+  const ok = await ensureInteractiveSession(interaction, session, reactionRoleSessions, {
+    restartHint: 'Use `!reaction-role create` novamente para configurar a reação.',
+  });
+  if (!ok) {
+    return;
+  }
+
+  switch (action) {
+    case 'channel':
+      await handleReactionRoleChannelSelection(interaction, session);
+      break;
+    case 'role':
+      await handleReactionRoleRoleSelection(interaction, session);
+      break;
+    case 'setEmoji':
+      await showReactionRoleEmojiModal(interaction, session);
+      break;
+    case 'setMessage':
+      await showReactionRoleMessageModal(interaction, session);
+      break;
+    case 'confirm':
+      await confirmReactionRoleCreation(interaction, session);
+      break;
+    case 'cancel':
+      await cancelReactionRoleCreation(interaction, session);
+      break;
+    case 'emojiModal':
+      await handleReactionRoleEmojiSubmission(interaction, session);
+      break;
+    case 'messageModal':
+      await handleReactionRoleMessageSubmission(interaction, session);
+      break;
+    default:
+      break;
+  }
+}
+
+async function handleReactionRoleChannelSelection(interaction, session) {
+  const selected = interaction.values?.[0];
+  if (!selected) {
+    await interaction.reply({ content: 'Selecione um canal válido.', ephemeral: true });
+    return;
+  }
+
+  session.targetChannelId = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos configurar a reação com cargo.`,
+    embeds: [buildReactionRoleEmbed(session)],
+    components: buildReactionRoleComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function handleReactionRoleRoleSelection(interaction, session) {
+  const selected = interaction.values?.[0];
+  if (!selected) {
+    await interaction.reply({ content: 'Selecione um cargo válido.', ephemeral: true });
+    return;
+  }
+
+  session.roleId = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos configurar a reação com cargo.`,
+    embeds: [buildReactionRoleEmbed(session)],
+    components: buildReactionRoleComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function showReactionRoleEmojiModal(interaction, session) {
+  if (typeof interaction.showModal !== 'function') return;
+
+  const modal = new ModalBuilder()
+    .setCustomId(`reactionRoleCreate:emojiModal:${session.id}`)
+    .setTitle('Emoji da reação');
+
+  const textInput = new TextInputBuilder()
+    .setCustomId('reactionEmoji')
+    .setLabel('Informe o emoji que será usado na reação')
+    .setStyle(TextInputStyle.Short)
+    .setMaxLength(20)
+    .setRequired(true);
+
+  if (session.emoji) {
+    textInput.setValue(session.emoji);
+  }
+
+  modal.addComponents(new ActionRowBuilder().addComponents(textInput));
+  await interaction.showModal(modal);
+}
+
+async function handleReactionRoleEmojiSubmission(interaction, session) {
+  const emoji = interaction.fields.getTextInputValue('reactionEmoji').trim();
+  if (!emoji) {
+    await interaction.reply({ content: 'Informe um emoji válido.', ephemeral: true });
+    return;
+  }
+
+  session.emoji = emoji;
+  session.updatedAt = Date.now();
+
+  const message = await fetchSessionMessage(interaction.guild, session);
+  if (message) {
+    await message.edit({
+      content: `<@${session.userId}> vamos configurar a reação com cargo.`,
+      embeds: [buildReactionRoleEmbed(session)],
+      components: buildReactionRoleComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await interaction.reply({ content: 'Emoji atualizado.', ephemeral: true });
+}
+
+async function showReactionRoleMessageModal(interaction, session) {
+  if (typeof interaction.showModal !== 'function') return;
+
+  const modal = new ModalBuilder()
+    .setCustomId(`reactionRoleCreate:messageModal:${session.id}`)
+    .setTitle('Mensagem da reação');
+
+  const textInput = new TextInputBuilder()
+    .setCustomId('reactionMessage')
+    .setLabel('Qual mensagem o bot deve enviar?')
+    .setStyle(TextInputStyle.Paragraph)
+    .setMaxLength(1500)
+    .setRequired(true);
+
+  if (session.messageContent) {
+    textInput.setValue(session.messageContent);
+  }
+
+  modal.addComponents(new ActionRowBuilder().addComponents(textInput));
+  await interaction.showModal(modal);
+}
+
+async function handleReactionRoleMessageSubmission(interaction, session) {
+  const messageContent = interaction.fields.getTextInputValue('reactionMessage').trim();
+  if (!messageContent) {
+    await interaction.reply({ content: 'Informe uma mensagem válida.', ephemeral: true });
+    return;
+  }
+
+  session.messageContent = messageContent;
+  session.updatedAt = Date.now();
+
+  const message = await fetchSessionMessage(interaction.guild, session);
+  if (message) {
+    await message.edit({
+      content: `<@${session.userId}> vamos configurar a reação com cargo.`,
+      embeds: [buildReactionRoleEmbed(session)],
+      components: buildReactionRoleComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await interaction.reply({ content: 'Mensagem atualizada.', ephemeral: true });
+}
+
+async function confirmReactionRoleCreation(interaction, session) {
+  if (!session.targetChannelId) {
+    await interaction.reply({ content: 'Selecione um canal para publicar a mensagem.', ephemeral: true });
+    return;
+  }
+
+  if (!session.roleId) {
+    await interaction.reply({ content: 'Escolha o cargo que será atribuído.', ephemeral: true });
+    return;
+  }
+
+  if (!session.emoji) {
+    await interaction.reply({ content: 'Defina o emoji que os membros devem reagir.', ephemeral: true });
+    return;
+  }
+
+  if (!session.messageContent) {
+    await interaction.reply({ content: 'Escreva a mensagem que será enviada.', ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const channel =
+      interaction.guild.channels.cache.get(session.targetChannelId) ||
+      (await interaction.guild.channels.fetch(session.targetChannelId).catch(() => null));
+
+    if (!channel || !channel.isTextBased()) {
+      throw new Error('Não foi possível acessar o canal selecionado.');
+    }
+
+    const message = await reactionRoleManager.createReactionRole({
+      channel,
+      emoji: session.emoji,
+      roleId: session.roleId,
+      messageContent: session.messageContent,
+    });
+
+    reactionRoleSessions.delete(session.id);
+
+    const embed = new EmbedBuilder()
+      .setTitle('Reação criada')
+      .setDescription('A mensagem de reação foi publicada com sucesso.')
+      .addFields(
+        { name: 'Canal', value: `<#${channel.id}>` },
+        { name: 'Cargo', value: `<@&${session.roleId}>` },
+        { name: 'Emoji', value: session.emoji },
+        { name: 'Mensagem publicada', value: `[Abrir mensagem](${message.url})` },
+      )
+      .setColor(0x57f287)
+      .setTimestamp(new Date());
+
+    await interaction.message.edit({
+      content: `<@${session.userId}> configuração concluída.`,
+      embeds: [embed],
+      components: [],
+      allowedMentions: { users: [session.userId] },
+    });
+
+    await interaction.editReply({ content: '✅ Reação configurada com sucesso.' });
+  } catch (error) {
+    console.error('Erro ao criar reação de cargo interativamente:', error);
+    await interaction.editReply({ content: `❌ Não foi possível criar a reação: ${error.message}` });
+  }
+}
+
+async function cancelReactionRoleCreation(interaction, session) {
+  reactionRoleSessions.delete(session.id);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Configuração cancelada')
+    .setDescription('O assistente de cargo por reação foi cancelado.')
+    .setColor(0xed4245)
+    .setTimestamp(new Date());
+
+  await interaction.update({
+    content: `<@${session.userId}> assistente cancelado.`,
+    embeds: [embed],
+    components: [],
+    allowedMentions: { users: [session.userId] },
+  });
+}
+
+async function ensureInteractiveSession(interaction, session, sessionMap, { restartHint }) {
+  const hint = restartHint || 'Inicie novamente o assistente.';
+
+  if (!session) {
+    if (interaction.isRepliable()) {
+      await interaction.reply({ content: `Esta configuração não está mais disponível. ${hint}`, ephemeral: true });
+    }
+    return false;
+  }
+
+  if (interaction.user.id !== session.userId) {
+    if (interaction.isRepliable()) {
+      await interaction.reply({
+        content: 'Somente quem iniciou esta configuração pode usar estes controles.',
+        ephemeral: true,
+      });
+    }
+    return false;
+  }
+
+  if (Date.now() > session.expiresAt) {
+    sessionMap.delete(session.id);
+    await disableSessionMessage(interaction.guild, session, `Configuração expirada. ${hint}`);
+    if (interaction.isRepliable()) {
+      await interaction.reply({ content: `Esta configuração expirou. ${hint}`, ephemeral: true });
+    }
+    return false;
+  }
+
+  return true;
 }
 
 async function disableSessionMessage(guild, session, reason) {

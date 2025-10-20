@@ -6,10 +6,10 @@ Bot de Discord em JavaScript para rastrear presença em eventos, administrar car
 
 - Rastreamento de tempo em canais de voz para membros de um cargo específico.
 - Criação de múltiplos eventos simultâneos, cada um com salas monitoradas.
-- Assistente interativo direto no chat para iniciar eventos sem precisar decorar a sintaxe completa.
+- Assistentes interativos diretos no chat para iniciar e encerrar eventos, criar mensagens de cargo por reação e enviar avisos.
 - Relatórios automáticos ao encerrar o evento, permitindo escolher o cargo para verificar presentes e ausentes.
-- Mensagens com reação para autoatribuição de cargo.
-- Envio de avisos para canais de texto escolhidos.
+- Mensagens com reação para autoatribuição de cargo, com assistente guiado para configurar canal, mensagem e emoji.
+- Envio de avisos para canais de texto escolhidos, com fluxo guiado para selecionar canal e conteúdo.
 
 ## Como começar
 

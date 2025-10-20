@@ -47,6 +47,14 @@ Cuida das mensagens que atribuem cargos por reação.
   - `<canal ...>`: um ou mais canais de voz (menção `#Sala` ou ID) que serão observados.
 - **Comportamento:** valida os canais informados, ativa o evento e começa a contabilizar o tempo de todos os membros do cargo que entrarem nas salas.
 
+#### `event stop`
+- **Função:** abre um assistente interativo para encerrar um evento ativo sem precisar informar argumentos manualmente.
+- **Como funciona:**
+  - Selecione qual evento ativo deve ser encerrado.
+  - Escolha o cargo que será usado para verificar presenças e faltas (pode ser diferente do cargo original monitorado).
+  - Confirme para que o bot gere o relatório e publique no canal padrão ou no canal atual.
+- **Expiração:** assim como no assistente de criação, a sessão expira após alguns minutos de inatividade.
+
 #### `event stop "Nome do Evento" <cargo>`
 - **Função:** encerra o evento e gera um relatório usando o cargo informado para verificar quem faltou.
 - **Resultado:** o bot envia um embed com:
@@ -76,12 +84,29 @@ Cuida das mensagens que atribuem cargos por reação.
 - **Parâmetros:**
   - `<messageId>`: ID da mensagem registrada no sistema de reação.
 
+#### `reaction-role create`
+- **Função:** inicia um assistente interativo para configurar uma nova mensagem com cargo por reação.
+- **Como funciona:**
+  - Escolha o canal de texto onde a mensagem será publicada.
+  - Defina a mensagem a ser enviada e o emoji que os usuários devem reagir.
+  - Selecione o cargo que será atribuído automaticamente.
+  - Confirme para que o bot publique a mensagem, reaja com o emoji e salve a configuração.
+- **Expiração:** a sessão também expira após alguns minutos sem interação; execute o comando novamente caso isso ocorra.
+
 #### `warn <canal> "Mensagem"`
 - **Função:** envia um aviso para o canal informado.
 - **Parâmetros:**
   - `<canal>`: menção ou ID do canal de texto.
   - `"Mensagem"`: conteúdo do aviso.
 - **Comportamento:** o bot publica a mensagem e confirma a entrega no canal onde o comando foi usado (se diferente).
+
+#### `warn`
+- **Função:** abre um assistente interativo para enviar um aviso sem precisar informar argumentos manualmente.
+- **Como funciona:**
+  - Selecione o canal de destino.
+  - Preencha o conteúdo do aviso em um modal.
+  - Confirme para que o bot publique a mensagem no canal escolhido.
+- **Expiração:** sessões inativas são canceladas automaticamente; execute o comando novamente para reiniciar.
 
 ## Persistência de dados
 
