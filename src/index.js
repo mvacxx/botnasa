@@ -48,6 +48,8 @@ const eventStopSessions = new Map();
 const warnSessions = new Map();
 const reactionRoleSessions = new Map();
 
+const MAX_ASSISTANT_MESSAGE_LENGTH = 1024;
+
 async function bootstrap() {
   await eventManager.init();
   await reactionRoleManager.init();
@@ -237,10 +239,20 @@ async function stopEvent(message, args) {
     return;
   }
 
-  const { targetChannel } = await endEventAndSendReport(message.guild, message.channelId, eventName, roleId);
+  const result = await endEventAndSendReport(
+    message.guild,
+    message.channelId,
+    eventName,
+    roleId,
+    message.member || message.author,
+  );
 
-  if (targetChannel.id !== message.channel.id) {
-    await message.reply(`Relatório enviado para <#${targetChannel.id}>.`);
+  if (result.dmChannel) {
+    await message.reply('✅ Evento encerrado. O relatório foi enviado no seu privado.');
+  } else if (result.fallbackChannel) {
+    await message.reply(
+      `⚠️ Não foi possível enviar o relatório por mensagem direta. Ele foi publicado em <#${result.fallbackChannel.id}>.`,
+    );
   }
 }
 
@@ -260,67 +272,106 @@ async function listEvents(message) {
   await message.reply(lines.join('\n'));
 }
 
-async function endEventAndSendReport(guild, fallbackChannelId, eventName, roleId) {
+async function endEventAndSendReport(guild, fallbackChannelId, eventName, roleId, requester) {
   const { summary, present, absent } = await eventManager.endEvent(guild, eventName, roleId);
-  const embed = buildEventReportEmbed(summary, present, absent);
+  const { attachment, fileName } = buildEventReportDocument(summary, present, absent, guild);
 
-  let targetChannel = null;
+  const targetUser = requester?.user ?? requester;
+  let dmChannel = null;
+
+  if (targetUser && typeof targetUser.createDM === 'function') {
+    try {
+      dmChannel = await targetUser.createDM();
+      await dmChannel.send({
+        content: `Aqui está o relatório do evento **${summary.eventName}**.`,
+        files: [{ attachment, name: fileName }],
+      });
+    } catch (error) {
+      console.error('Não foi possível enviar o relatório por DM:', error);
+      dmChannel = null;
+    }
+  }
+
+  if (dmChannel) {
+    return { summary, present, absent, dmChannel };
+  }
+
+  let fallbackChannel = null;
   if (config.defaultReportChannelId) {
-    targetChannel =
+    fallbackChannel =
       guild.channels.cache.get(config.defaultReportChannelId) ||
       (await guild.channels.fetch(config.defaultReportChannelId).catch(() => null));
   }
 
-  if (!targetChannel || !targetChannel.isTextBased()) {
-    targetChannel =
+  if (!fallbackChannel || !fallbackChannel.isTextBased()) {
+    fallbackChannel =
       guild.channels.cache.get(fallbackChannelId) ||
       (await guild.channels.fetch(fallbackChannelId).catch(() => null));
   }
 
-  if (!targetChannel || !targetChannel.isTextBased()) {
-    throw new Error('Não foi possível encontrar um canal de texto para enviar o relatório.');
+  if (!fallbackChannel || !fallbackChannel.isTextBased()) {
+    throw new Error(
+      'Não foi possível enviar o relatório por mensagem direta nem encontrar um canal de texto para publicação.',
+    );
   }
 
-  await targetChannel.send({ embeds: [embed] });
+  await fallbackChannel.send({
+    content: `Não foi possível enviar o relatório do evento **${summary.eventName}** por mensagem direta. Segue o documento:`,
+    files: [{ attachment, name: fileName }],
+    allowedMentions: { users: [] },
+  });
 
-  return { summary, present, absent, embed, targetChannel };
+  return { summary, present, absent, dmChannel: null, fallbackChannel };
 }
 
-function buildEventReportEmbed(summary, present, absent) {
-  const embed = new EmbedBuilder()
-    .setTitle(`Relatório do evento: ${summary.eventName}`)
-    .setDescription(
-      `Início: <t:${Math.floor(new Date(summary.startedAt).getTime() / 1000)}:f>\n` +
-        `Fim: <t:${Math.floor(new Date(summary.endedAt).getTime() / 1000)}:f>`,
-    )
-    .addFields(
-      {
-        name: `Presentes (${present.length})`,
-        value:
-          present.length > 0
-            ? present
-                .map((entry) => {
-                  const suffix = entry.hadRoleAtEnd ? '' : ' _(sem o cargo no encerramento)_';
-                  return `• ${entry.displayName} — ${formatDuration(entry.totalMs)}${suffix}`;
-                })
-                .join('\n')
-            : 'Nenhum membro com o cargo participou.',
-      },
-      {
-        name: `Faltas (${absent.length})`,
-        value:
-          absent.length > 0
-            ? absent.map((entry) => `• ${entry.displayName}`).join('\n')
-            : 'Todos os membros com o cargo participaram.',
-      },
-    )
-    .setTimestamp(new Date(summary.endedAt));
-
+function buildEventReportDocument(summary, present, absent, guild) {
+  const lines = [];
+  lines.push(`Relatório do evento: ${summary.eventName}`);
+  lines.push(`Servidor: ${guild?.name || 'Desconhecido'} (ID: ${guild?.id || 'n/d'})`);
+  lines.push(`Cargo verificado: ${summary.roleId ? `ID ${summary.roleId}` : 'não informado'}`);
   if (summary.originalRoleId && summary.originalRoleId !== summary.roleId) {
-    embed.addFields({ name: 'Cargo monitorado no início', value: `<@&${summary.originalRoleId}>` });
+    lines.push(`Cargo monitorado no início: ID ${summary.originalRoleId}`);
+  }
+  lines.push(`Início: ${new Date(summary.startedAt).toLocaleString('pt-BR')}`);
+  lines.push(`Fim: ${new Date(summary.endedAt).toLocaleString('pt-BR')}`);
+  lines.push('');
+
+  lines.push(`Presentes (${present.length})`);
+  if (present.length > 0) {
+    for (const entry of present) {
+      const roleSuffix = entry.hadRoleAtEnd ? '' : ' (sem o cargo no encerramento)';
+      lines.push(`- ${entry.displayName} — ${formatDuration(entry.totalMs)}${roleSuffix}`);
+    }
+  } else {
+    lines.push('- Nenhum membro com o cargo participou.');
   }
 
-  return embed;
+  lines.push('');
+  lines.push(`Faltas (${absent.length})`);
+  if (absent.length > 0) {
+    for (const entry of absent) {
+      lines.push(`- ${entry.displayName}`);
+    }
+  } else {
+    lines.push('- Todos os membros com o cargo participaram.');
+  }
+
+  lines.push('');
+  lines.push('Observações automáticas:');
+  lines.push(
+    '- Este documento foi gerado automaticamente com base na presença em canais de voz monitorados durante o período do evento.',
+  );
+
+  const content = lines.join('\n');
+  const normalizedName = summary.eventName
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase();
+  const fileName = `relatorio-${normalizedName || 'evento'}.doc`;
+
+  return { attachment: Buffer.from(content, 'utf8'), fileName };
 }
 
 async function handleEventStartInteraction(interaction) {
@@ -412,7 +463,14 @@ async function createReactionRole(message, args) {
   const channelId = extractId(args.shift());
   const emoji = args.shift();
   const roleId = extractId(args.shift());
-  const messageContent = args.join(' ');
+  const messageContentRaw = args.join(' ');
+  if (messageContentRaw.length > MAX_ASSISTANT_MESSAGE_LENGTH) {
+    await message.reply(
+      `A mensagem deve ter no máximo ${MAX_ASSISTANT_MESSAGE_LENGTH} caracteres para criar a reação com cargo.`,
+    );
+    return;
+  }
+  const messageContent = messageContentRaw;
 
   if (!channelId || !emoji || !roleId) {
     await message.reply('Confira se canal, emoji e cargo foram informados corretamente.');
@@ -453,7 +511,14 @@ async function handleWarnCommand(message, args) {
   }
 
   const channelId = extractId(args.shift());
-  const content = args.join(' ');
+  const contentRaw = args.join(' ');
+  if (contentRaw.length > MAX_ASSISTANT_MESSAGE_LENGTH) {
+    await message.reply(
+      `O aviso deve ter no máximo ${MAX_ASSISTANT_MESSAGE_LENGTH} caracteres para ser enviado.`,
+    );
+    return;
+  }
+  const content = contentRaw;
   const channel = await message.guild.channels.fetch(channelId);
   if (!channel || !channel.isTextBased()) {
     await message.reply('Informe um canal de texto válido.');
@@ -922,24 +987,28 @@ async function confirmEventStop(interaction, session) {
   await interaction.deferReply({ ephemeral: true });
 
   try {
-    const { targetChannel } = await endEventAndSendReport(
+    const result = await endEventAndSendReport(
       interaction.guild,
       session.channelId,
       selectedEvent.name,
       session.roleId,
+      interaction.member || interaction.user,
     );
 
     eventStopSessions.delete(session.id);
 
     const embed = new EmbedBuilder()
       .setTitle('Evento encerrado')
-      .setDescription(`O evento **${selectedEvent.name}** foi encerrado e o relatório foi publicado.`)
-      .addFields(
-        { name: 'Cargo verificado', value: `<@&${session.roleId}>` },
-        { name: 'Relatório', value: `<#${targetChannel.id}>` },
-      )
+      .setDescription(`O evento **${selectedEvent.name}** foi encerrado.`)
+      .addFields({ name: 'Cargo verificado', value: `<@&${session.roleId}>` })
       .setColor(0x57f287)
       .setTimestamp(new Date());
+
+    if (result.dmChannel) {
+      embed.addFields({ name: 'Relatório', value: 'Enviado por mensagem direta.' });
+    } else if (result.fallbackChannel) {
+      embed.addFields({ name: 'Relatório', value: `<#${result.fallbackChannel.id}>` });
+    }
 
     await interaction.message.edit({
       content: `<@${session.userId}> evento encerrado.`,
@@ -948,12 +1017,17 @@ async function confirmEventStop(interaction, session) {
       allowedMentions: { users: [session.userId] },
     });
 
-    const acknowledgement =
-      targetChannel.id === session.channelId
-        ? '✅ Evento encerrado e relatório publicado nesta sala.'
-        : `✅ Evento encerrado. O relatório foi publicado em <#${targetChannel.id}>.`;
-
-    await interaction.editReply({ content: acknowledgement });
+    if (result.dmChannel) {
+      await interaction.editReply({
+        content: '✅ Evento encerrado. O relatório foi enviado por mensagem direta.',
+      });
+    } else if (result.fallbackChannel) {
+      const sameChannel = result.fallbackChannel.id === session.channelId;
+      const acknowledgement = sameChannel
+        ? '✅ Evento encerrado. Não foi possível enviar por DM, então o relatório foi publicado nesta sala.'
+        : `✅ Evento encerrado. Não foi possível enviar por DM, então o relatório foi publicado em <#${result.fallbackChannel.id}>.`;
+      await interaction.editReply({ content: acknowledgement });
+    }
   } catch (error) {
     console.error('Erro ao encerrar evento interativamente:', error);
     await interaction.editReply({ content: `❌ Não foi possível encerrar o evento: ${error.message}` });
@@ -1017,7 +1091,9 @@ function buildWarnEmbed(session) {
     },
     {
       name: 'Mensagem',
-      value: session.messageContent ? session.messageContent.slice(0, 1024) : 'Nenhuma mensagem definida.',
+      value: session.messageContent
+        ? session.messageContent.slice(0, MAX_ASSISTANT_MESSAGE_LENGTH)
+        : 'Nenhuma mensagem definida.',
     },
   );
 
@@ -1119,10 +1195,10 @@ async function showWarnMessageModal(interaction, session) {
     .setLabel('Qual mensagem deseja enviar?')
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(true)
-    .setMaxLength(1500);
+    .setMaxLength(MAX_ASSISTANT_MESSAGE_LENGTH);
 
   if (session.messageContent) {
-    textInput.setValue(session.messageContent);
+    textInput.setValue(session.messageContent.slice(0, MAX_ASSISTANT_MESSAGE_LENGTH));
   }
 
   modal.addComponents(new ActionRowBuilder().addComponents(textInput));
@@ -1130,7 +1206,10 @@ async function showWarnMessageModal(interaction, session) {
 }
 
 async function handleWarnMessageSubmission(interaction, session) {
-  const messageContent = interaction.fields.getTextInputValue('warnMessage').trim();
+  const messageContent = interaction.fields
+    .getTextInputValue('warnMessage')
+    .trim()
+    .slice(0, MAX_ASSISTANT_MESSAGE_LENGTH);
   if (!messageContent) {
     await interaction.reply({ content: 'Informe uma mensagem válida.', ephemeral: true });
     return;
@@ -1257,7 +1336,9 @@ function buildReactionRoleEmbed(session) {
     { name: 'Emoji', value: session.emoji || 'Nenhum emoji definido.' },
     {
       name: 'Mensagem',
-      value: session.messageContent ? session.messageContent.slice(0, 1024) : 'Nenhuma mensagem definida.',
+      value: session.messageContent
+        ? session.messageContent.slice(0, MAX_ASSISTANT_MESSAGE_LENGTH)
+        : 'Nenhuma mensagem definida.',
     },
   );
 
@@ -1454,11 +1535,11 @@ async function showReactionRoleMessageModal(interaction, session) {
     .setCustomId('reactionMessage')
     .setLabel('Qual mensagem o bot deve enviar?')
     .setStyle(TextInputStyle.Paragraph)
-    .setMaxLength(1500)
+    .setMaxLength(MAX_ASSISTANT_MESSAGE_LENGTH)
     .setRequired(true);
 
   if (session.messageContent) {
-    textInput.setValue(session.messageContent);
+    textInput.setValue(session.messageContent.slice(0, MAX_ASSISTANT_MESSAGE_LENGTH));
   }
 
   modal.addComponents(new ActionRowBuilder().addComponents(textInput));
@@ -1466,7 +1547,10 @@ async function showReactionRoleMessageModal(interaction, session) {
 }
 
 async function handleReactionRoleMessageSubmission(interaction, session) {
-  const messageContent = interaction.fields.getTextInputValue('reactionMessage').trim();
+  const messageContent = interaction.fields
+    .getTextInputValue('reactionMessage')
+    .trim()
+    .slice(0, MAX_ASSISTANT_MESSAGE_LENGTH);
   if (!messageContent) {
     await interaction.reply({ content: 'Informe uma mensagem válida.', ephemeral: true });
     return;

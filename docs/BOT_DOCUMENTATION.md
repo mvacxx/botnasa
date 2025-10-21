@@ -6,7 +6,7 @@ Este documento descreve o funcionamento de cada módulo do bot, bem como os coma
 
 - **Token do bot:** defina a variável de ambiente `DISCORD_TOKEN` no arquivo `.env`.
 - **Prefixo de comandos:** ajustável em `config/config.json` (padrão `!`).
-- **Canal padrão para relatórios:** `defaultReportChannelId` no mesmo arquivo permite direcionar os relatórios de presença para um canal fixo; deixe vazio para usar o canal em que o comando `event stop` foi executado.
+- **Canal padrão para relatórios:** `defaultReportChannelId` no mesmo arquivo é usado como fallback caso o envio por mensagem direta falhe e o bot precise publicar o documento em um canal.
 
 ## Módulos principais
 
@@ -52,17 +52,13 @@ Cuida das mensagens que atribuem cargos por reação.
 - **Como funciona:**
   - Selecione qual evento ativo deve ser encerrado.
   - Escolha o cargo que será usado para verificar presenças e faltas (pode ser diferente do cargo original monitorado).
-  - Confirme para que o bot gere o relatório e publique no canal padrão ou no canal atual.
+  - Confirme para que o bot gere o relatório e envie o documento por mensagem direta; se o envio falhar, o arquivo será publicado no canal padrão ou no canal onde o comando foi usado.
 - **Expiração:** assim como no assistente de criação, a sessão expira após alguns minutos de inatividade.
 
 #### `event stop "Nome do Evento" <cargo>`
 - **Função:** encerra o evento e gera um relatório usando o cargo informado para verificar quem faltou.
-- **Resultado:** o bot envia um embed com:
-  - Nome do evento e horários de início/fim.
-  - Lista de presentes com o tempo total conectado (formato `HH:MM:SS`).
-  - Indicação caso algum presente não esteja mais com o cargo no momento do encerramento.
-  - Lista de membros do cargo informado que não estiveram nos canais monitorados.
-- **Observação:** o relatório é enviado para o canal configurado em `defaultReportChannelId` ou, se vazio, no canal em que o comando foi executado.
+- **Resultado:** o bot gera um documento (`.doc`) com o resumo do evento (horários, presentes com duração formatada e faltas) e envia o arquivo por mensagem direta para o administrador que encerrou o evento.
+- **Observação:** se o envio por DM falhar (por exemplo, porque o administrador bloqueia mensagens diretas do servidor), o bot publica o documento no canal configurado em `defaultReportChannelId` ou, se vazio, no canal em que o comando foi executado.
 
 #### `event list`
 - **Função:** mostra os eventos atualmente ativos no servidor, incluindo cargo monitorado, canais observados e horário de início.
@@ -76,7 +72,7 @@ Cuida das mensagens que atribuem cargos por reação.
   - `<canal>`: menção ou ID de um canal de texto onde a mensagem será publicada.
   - `<emoji>`: emoji (padrão ou personalizado) que os usuários devem reagir.
   - `<cargo>`: cargo a ser atribuído.
-  - `"Mensagem"`: conteúdo textual da mensagem publicada.
+  - `"Mensagem"`: conteúdo textual da mensagem publicada (até 1024 caracteres).
 - **Comportamento:** o bot envia a mensagem, adiciona a reação e armazena a configuração. Ao reagir, os membros recebem o cargo automaticamente; ao remover a reação, o cargo é retirado.
 
 #### `reaction-role remove <messageId>`
@@ -88,7 +84,7 @@ Cuida das mensagens que atribuem cargos por reação.
 - **Função:** inicia um assistente interativo para configurar uma nova mensagem com cargo por reação.
 - **Como funciona:**
   - Escolha o canal de texto onde a mensagem será publicada.
-  - Defina a mensagem a ser enviada e o emoji que os usuários devem reagir.
+  - Defina a mensagem a ser enviada (limite de 1024 caracteres) e o emoji que os usuários devem reagir.
   - Selecione o cargo que será atribuído automaticamente.
   - Confirme para que o bot publique a mensagem, reaja com o emoji e salve a configuração.
 - **Expiração:** a sessão também expira após alguns minutos sem interação; execute o comando novamente caso isso ocorra.
@@ -97,14 +93,14 @@ Cuida das mensagens que atribuem cargos por reação.
 - **Função:** envia um aviso para o canal informado.
 - **Parâmetros:**
   - `<canal>`: menção ou ID do canal de texto.
-  - `"Mensagem"`: conteúdo do aviso.
+  - `"Mensagem"`: conteúdo do aviso (até 1024 caracteres).
 - **Comportamento:** o bot publica a mensagem e confirma a entrega no canal onde o comando foi usado (se diferente).
 
 #### `warn`
 - **Função:** abre um assistente interativo para enviar um aviso sem precisar informar argumentos manualmente.
 - **Como funciona:**
   - Selecione o canal de destino.
-  - Preencha o conteúdo do aviso em um modal.
+  - Preencha o conteúdo do aviso em um modal (limite de 1024 caracteres para atender à API do Discord).
   - Confirme para que o bot publique a mensagem no canal escolhido.
 - **Expiração:** sessões inativas são canceladas automaticamente; execute o comando novamente para reiniciar.
 
