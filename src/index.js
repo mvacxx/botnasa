@@ -137,6 +137,14 @@ client.on('messageReactionAdd', async (reaction, user) => {
       return;
     }
   }
+  if (reaction.message.partial) {
+    try {
+      await reaction.message.fetch();
+    } catch (error) {
+      console.error('Não foi possível carregar a mensagem da reação adicionada.', error);
+      return;
+    }
+  }
   await reactionRoleManager.handleReactionAdd(reaction, user);
 });
 
@@ -146,6 +154,14 @@ client.on('messageReactionRemove', async (reaction, user) => {
       await reaction.fetch();
     } catch (error) {
       console.error('Não foi possível carregar a reação removida.', error);
+      return;
+    }
+  }
+  if (reaction.message.partial) {
+    try {
+      await reaction.message.fetch();
+    } catch (error) {
+      console.error('Não foi possível carregar a mensagem da reação removida.', error);
       return;
     }
   }
