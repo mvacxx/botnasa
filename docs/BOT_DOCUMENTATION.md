@@ -113,6 +113,15 @@ Gerencia os tickets de suporte abertos pelos usuários.
   - Confirme para que o bot publique a mensagem no canal escolhido.
 - **Expiração:** sessões inativas são canceladas automaticamente; execute o comando novamente para reiniciar.
 
+#### `ticket panel [mensagem]`
+- **Função:** publica no canal atual um painel fixo com botão **Abrir Ticket** para que os membros iniciem atendimentos privados.
+- **Permissões:** requer que o administrador possua permissão de **Gerenciar canais** no servidor.
+- **Comportamento:**
+  - O painel inclui um embed destacando o cargo configurado em `tickets.supportRoleId` e, opcionalmente, a mensagem personalizada.
+  - O conteúdo opcional `[mensagem]` define a descrição exibida no painel (limitada a 1024 caracteres). Se omitido, o bot usa um texto padrão.
+  - Ao clicar no botão, o usuário inicia o fluxo de criação de ticket como se tivesse executado `ticket open`.
+- **Boas práticas:** posicione o painel em um canal visível para todos os membros que possam precisar de suporte.
+
 #### `ticket open [motivo]`
 - **Função:** abre um canal privado de suporte visível para o usuário solicitante e para o cargo definido em `tickets.supportRoleId`.
 - **Comportamento:**
@@ -120,6 +129,7 @@ Gerencia os tickets de suporte abertos pelos usuários.
   - O canal é criado com permissões restritas, opcionalmente dentro da categoria configurada em `tickets.categoryId`.
   - Um botão **Encerrar ticket** é publicado para que o solicitante ou a equipe possam finalizar o atendimento.
   - O argumento opcional `[motivo]` é anexado ao ticket como resumo inicial para agilizar o suporte.
+  - O mesmo fluxo é acionado automaticamente quando o usuário clica no botão "Abrir Ticket" publicado pelo comando `ticket panel`.
 
 #### `ticket close`
 - **Função:** encerra o ticket atual quando executado dentro de um canal de ticket.

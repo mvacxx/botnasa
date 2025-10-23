@@ -308,31 +308,46 @@ async function handleTicketCommand(message, args) {
   const normalized = typeof firstArg === 'string' ? firstArg.toLowerCase() : null;
 
   if (!firstArg) {
-    await openTicket(message, []);
+    await openTicketFromMessage(message, []);
     return;
   }
 
-  if (normalized === 'open') {
-    await openTicket(message, restArgs);
-    return;
+  switch (normalized) {
+    case 'open':
+      await openTicketFromMessage(message, restArgs);
+      return;
+    case 'close':
+      await closeTicketCommand(message);
+      return;
+    case 'panel':
+      await createTicketPanel(message, restArgs);
+      return;
+    default:
+      await openTicketFromMessage(message, [firstArg, ...restArgs]);
+      return;
   }
-
-  if (normalized === 'close') {
-    await closeTicketCommand(message);
-    return;
-  }
-
-  await openTicket(message, [firstArg, ...restArgs]);
 }
 
-async function openTicket(message, reasonParts) {
-  const guild = message.guild;
+async function openTicketFromMessage(message, reasonParts) {
+  const reason = Array.isArray(reasonParts) ? reasonParts.join(' ').trim() : '';
+  await openTicketWithContext({
+    guild: message.guild,
+    user: message.author,
+    reason,
+    sendReply: (payload) => message.reply(payload),
+  });
+}
+
+async function openTicketWithContext({ guild, user, reason, sendReply }) {
+  if (!guild) {
+    await sendReply('Este comando só pode ser usado dentro de um servidor.');
+    return;
+  }
+
   const supportRoleId = config.tickets?.supportRoleId;
 
   if (!supportRoleId) {
-    await message.reply(
-      'Configure o campo `tickets.supportRoleId` em `config/config.json` antes de abrir tickets.',
-    );
+    await sendReply('Configure o campo `tickets.supportRoleId` em `config/config.json` antes de abrir tickets.');
     return;
   }
 
@@ -340,13 +355,13 @@ async function openTicket(message, reasonParts) {
     guild.roles.cache.get(supportRoleId) || (await guild.roles.fetch(supportRoleId).catch(() => null));
 
   if (!supportRole) {
-    await message.reply('Não encontrei o cargo configurado para atender os tickets.');
+    await sendReply('Não encontrei o cargo configurado para atender os tickets.');
     return;
   }
 
-  const existingChannel = await ticketManager.findExistingChannel(guild, message.author.id);
+  const existingChannel = await ticketManager.findExistingChannel(guild, user.id);
   if (existingChannel) {
-    await message.reply(`Você já possui um ticket aberto em ${existingChannel}.`);
+    await sendReply(`Você já possui um ticket aberto em ${existingChannel}.`);
     return;
   }
 
@@ -356,20 +371,19 @@ async function openTicket(message, reasonParts) {
     parent =
       guild.channels.cache.get(categoryId) || (await guild.channels.fetch(categoryId).catch(() => null));
     if (!parent || parent.type !== ChannelType.GuildCategory) {
-      await message.reply('A categoria configurada para tickets não foi encontrada ou não é uma categoria válida.');
+      await sendReply('A categoria configurada para tickets não foi encontrada ou não é uma categoria válida.');
       return;
     }
   }
 
-  const reason = Array.isArray(reasonParts) ? reasonParts.join(' ').trim() : '';
-  const limitedReason = reason.slice(0, 1024);
+  const limitedReason = typeof reason === 'string' ? reason.slice(0, 1024) : '';
 
   let channel;
   try {
     const permissionOverwrites = [
       { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
       {
-        id: message.author.id,
+        id: user.id,
         allow: [
           PermissionFlagsBits.ViewChannel,
           PermissionFlagsBits.SendMessages,
@@ -386,10 +400,12 @@ async function openTicket(message, reasonParts) {
       },
     ];
 
+    const topicUserTag = user.tag ?? user.username ?? user.id;
+
     const channelOptions = {
-      name: buildTicketChannelName(message.author),
+      name: buildTicketChannelName(user),
       type: ChannelType.GuildText,
-      topic: `Ticket aberto por ${message.author.tag ?? message.author.username} (${message.author.id})`,
+      topic: `Ticket aberto por ${topicUserTag} (${user.id})`,
       permissionOverwrites,
     };
 
@@ -400,16 +416,16 @@ async function openTicket(message, reasonParts) {
     channel = await guild.channels.create(channelOptions);
   } catch (error) {
     console.error('Erro ao criar canal de ticket:', error);
-    await message.reply('❌ Não foi possível criar o canal do ticket. Verifique as permissões do bot.');
+    await sendReply('❌ Não foi possível criar o canal do ticket. Verifique as permissões do bot.');
     return;
   }
 
   try {
-    await ticketManager.registerTicket(guild.id, message.author.id, channel.id);
+    await ticketManager.registerTicket(guild.id, user.id, channel.id);
   } catch (error) {
     console.error('Erro ao registrar ticket:', error);
     await channel.delete('Falha ao registrar ticket').catch(() => {});
-    await message.reply('❌ Não foi possível registrar o ticket. Tente novamente mais tarde.');
+    await sendReply('❌ Não foi possível registrar o ticket. Tente novamente mais tarde.');
     return;
   }
 
@@ -417,7 +433,7 @@ async function openTicket(message, reasonParts) {
     .setTitle('Ticket de suporte')
     .setDescription('Descreva seu pedido ou problema e aguarde um membro da equipe.')
     .setColor(0x5865f2)
-    .addFields({ name: 'Aberto por', value: `<@${message.author.id}>`, inline: true })
+    .addFields({ name: 'Aberto por', value: `<@${user.id}>`, inline: true })
     .setTimestamp(new Date());
 
   if (supportRoleId) {
@@ -429,17 +445,17 @@ async function openTicket(message, reasonParts) {
   }
 
   const closeButton = new ButtonBuilder()
-    .setCustomId(`ticket:close:${message.author.id}`)
+    .setCustomId(`ticket:close:${user.id}`)
     .setLabel('Encerrar ticket')
     .setStyle(ButtonStyle.Danger);
 
-  const allowedMentions = { users: [message.author.id] };
+  const allowedMentions = { users: [user.id] };
   if (supportRoleId) {
     allowedMentions.roles = [supportRoleId];
   }
 
   try {
-    const contentParts = [`<@${message.author.id}> ticket aberto.`];
+    const contentParts = [`<@${user.id}> ticket aberto.`];
     if (supportRoleId) {
       contentParts.push(`<@&${supportRoleId}>`);
     }
@@ -451,15 +467,84 @@ async function openTicket(message, reasonParts) {
       allowedMentions,
     });
 
-    await message.reply(`🎟️ Seu ticket foi aberto em ${channel}.`);
+    await sendReply(`🎟️ Seu ticket foi aberto em ${channel}.`);
   } catch (error) {
     console.error('Erro ao finalizar configuração do ticket:', error);
     await ticketManager
-      .clearTicket(guild.id, message.author.id)
+      .clearTicket(guild.id, user.id)
       .catch((clearError) => console.error('Falha ao limpar ticket após erro.', clearError));
     await channel.delete('Falha ao enviar mensagem inicial do ticket').catch(() => {});
-    await message.reply('❌ Ocorreu um erro ao preparar o ticket. Tente novamente mais tarde.');
+    await sendReply('❌ Ocorreu um erro ao preparar o ticket. Tente novamente mais tarde.');
   }
+}
+
+async function openTicketFromInteraction(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  await openTicketWithContext({
+    guild: interaction.guild,
+    user: interaction.user,
+    reason: '',
+    sendReply: (payload) => interaction.editReply(payload),
+  });
+}
+
+async function createTicketPanel(message, args) {
+  if (!message.channel || !message.channel.isTextBased()) {
+    await message.reply('Execute este comando em um canal de texto para criar o painel de tickets.');
+    return;
+  }
+
+  const member = message.member;
+  if (!member?.permissions?.has(PermissionFlagsBits.ManageChannels)) {
+    await message.reply('Você precisa da permissão de gerenciar canais para criar o painel de tickets.');
+    return;
+  }
+
+  const supportRoleId = config.tickets?.supportRoleId;
+
+  if (!supportRoleId) {
+    await message.reply('Configure o campo `tickets.supportRoleId` em `config/config.json` antes de criar o painel.');
+    return;
+  }
+
+  const supportRole =
+    message.guild.roles.cache.get(supportRoleId) ||
+    (await message.guild.roles.fetch(supportRoleId).catch(() => null));
+
+  if (!supportRole) {
+    await message.reply('Não encontrei o cargo configurado para atender os tickets.');
+    return;
+  }
+
+  const customDescription = Array.isArray(args) ? args.join(' ').trim() : '';
+  if (customDescription.length > MAX_ASSISTANT_MESSAGE_LENGTH) {
+    await message.reply(
+      `A descrição do painel deve ter no máximo ${MAX_ASSISTANT_MESSAGE_LENGTH} caracteres.`,
+    );
+    return;
+  }
+
+  const description =
+    customDescription ||
+    'Clique no botão abaixo para abrir um ticket privado com a equipe de suporte.';
+
+  const button = new ButtonBuilder().setCustomId('ticket:open').setLabel('Abrir Ticket').setStyle(ButtonStyle.Primary);
+
+  const embed = new EmbedBuilder()
+    .setTitle('Central de suporte')
+    .setDescription(description)
+    .setColor(0x5865f2)
+    .addFields({ name: 'Equipe responsável', value: `<@&${supportRoleId}>` })
+    .setTimestamp(new Date());
+
+  await message.channel.send({
+    embeds: [embed],
+    components: [new ActionRowBuilder().addComponents(button)],
+    allowedMentions: { parse: [] },
+  });
+
+  await message.reply('✅ Painel de tickets criado neste canal.');
 }
 
 async function closeTicketCommand(message) {
@@ -500,6 +585,9 @@ async function handleTicketInteraction(interaction) {
   const [, action, ownerId] = interaction.customId.split(':');
 
   switch (action) {
+    case 'open':
+      await openTicketFromInteraction(interaction);
+      break;
     case 'close':
       await handleTicketCloseInteraction(interaction, ownerId);
       break;
@@ -760,6 +848,7 @@ async function handleHelpCommand(message) {
     `• \`${prefix}reaction-role remove <messageId>\` — remove a atribuição de cargo por reação.`,
     `• \`${prefix}warn\` — abre o assistente para enviar um aviso.`,
     `• \`${prefix}warn #canal "Mensagem"\` — envia um aviso para o canal informado.`,
+    `• \`${prefix}ticket panel [mensagem]\` — publica um painel com botão "Abrir Ticket" no canal atual.`,
     `• \`${prefix}ticket open [motivo]\` — cria um canal privado com a equipe configurada para suporte.`,
     `• \`${prefix}ticket close\` — encerra o ticket atual (execute dentro do canal do ticket).`,
   ];

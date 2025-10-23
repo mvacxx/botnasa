@@ -11,6 +11,7 @@ Bot de Discord em JavaScript para rastrear presença em eventos, administrar car
 - Mensagens com reação para autoatribuição de cargo, com assistente guiado para configurar canal, mensagem e emoji.
 - Envio de avisos para canais de texto escolhidos, com fluxo guiado para selecionar canal e conteúdo.
 - Sistema de tickets para suporte: usuários abrem um canal privado e a equipe configurada atende e encerra com um clique.
+- Painel fixo com botão "Abrir Ticket" para que membros iniciem o atendimento diretamente do canal desejado.
 
 ## Como começar
 
