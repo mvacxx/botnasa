@@ -9,6 +9,7 @@ const {
   ChannelType,
   Client,
   EmbedBuilder,
+  PermissionFlagsBits,
   GatewayIntentBits,
   ModalBuilder,
   Partials,
@@ -20,14 +21,21 @@ const {
 } = require('discord.js');
 const EventManager = require('./eventManager');
 const ReactionRoleManager = require('./reactionRoleManager');
+const TicketManager = require('./ticketManager');
 const { extractId, formatDuration } = require('./utils/parsers');
 const { splitArgs } = require('./utils/args');
 
 const configPath = path.join(__dirname, '..', 'config', 'config.json');
-const defaultConfig = { prefix: '!', defaultReportChannelId: '' };
+const defaultConfig = {
+  prefix: '!',
+  defaultReportChannelId: '',
+  tickets: { supportRoleId: '', categoryId: '' },
+};
 const config = fs.existsSync(configPath)
   ? { ...defaultConfig, ...JSON.parse(fs.readFileSync(configPath, 'utf8')) }
   : defaultConfig;
+
+config.tickets = { ...defaultConfig.tickets, ...(config.tickets ?? {}) };
 
 const client = new Client({
   intents: [
@@ -43,16 +51,19 @@ const client = new Client({
 
 const eventManager = new EventManager(client);
 const reactionRoleManager = new ReactionRoleManager(client);
+const ticketManager = new TicketManager(client);
 const eventCreationSessions = new Map();
 const eventStopSessions = new Map();
 const warnSessions = new Map();
 const reactionRoleSessions = new Map();
 
 const MAX_ASSISTANT_MESSAGE_LENGTH = 1024;
+const TICKET_CLOSE_DELAY_MS = 10_000;
 
 async function bootstrap() {
   await eventManager.init();
   await reactionRoleManager.init();
+  await ticketManager.init();
 }
 
 client.once('ready', async () => {
@@ -81,6 +92,9 @@ client.on('messageCreate', async (message) => {
         break;
       case 'warn':
         await handleWarnCommand(message, rest);
+        break;
+      case 'ticket':
+        await handleTicketCommand(message, rest);
         break;
       case 'help':
         await handleHelpCommand(message);
@@ -121,6 +135,8 @@ client.on('interactionCreate', async (interaction) => {
       await handleWarnInteraction(interaction);
     } else if (customId.startsWith('reactionRoleCreate:')) {
       await handleReactionRoleCreationInteraction(interaction);
+    } else if (customId.startsWith('ticket:')) {
+      await handleTicketInteraction(interaction);
     }
   } catch (error) {
     console.error('Erro ao lidar com interação:', error);
@@ -168,6 +184,16 @@ client.on('messageReactionRemove', async (reaction, user) => {
     }
   }
   await reactionRoleManager.handleReactionRemove(reaction, user);
+});
+
+client.on('channelDelete', async (channel) => {
+  if (!channel.guild) return;
+
+  try {
+    await ticketManager.handleChannelDeletion(channel.guild.id, channel.id);
+  } catch (error) {
+    console.error('Erro ao limpar ticket após remoção do canal.', error);
+  }
 });
 
 async function handleEventCommand(message, args) {
@@ -270,6 +296,310 @@ async function listEvents(message) {
   });
 
   await message.reply(lines.join('\n'));
+}
+
+async function handleTicketCommand(message, args) {
+  if (!message.guild) {
+    await message.reply('Este comando só pode ser usado dentro de um servidor.');
+    return;
+  }
+
+  const [firstArg, ...restArgs] = args;
+  const normalized = typeof firstArg === 'string' ? firstArg.toLowerCase() : null;
+
+  if (!firstArg) {
+    await openTicket(message, []);
+    return;
+  }
+
+  if (normalized === 'open') {
+    await openTicket(message, restArgs);
+    return;
+  }
+
+  if (normalized === 'close') {
+    await closeTicketCommand(message);
+    return;
+  }
+
+  await openTicket(message, [firstArg, ...restArgs]);
+}
+
+async function openTicket(message, reasonParts) {
+  const guild = message.guild;
+  const supportRoleId = config.tickets?.supportRoleId;
+
+  if (!supportRoleId) {
+    await message.reply(
+      'Configure o campo `tickets.supportRoleId` em `config/config.json` antes de abrir tickets.',
+    );
+    return;
+  }
+
+  const supportRole =
+    guild.roles.cache.get(supportRoleId) || (await guild.roles.fetch(supportRoleId).catch(() => null));
+
+  if (!supportRole) {
+    await message.reply('Não encontrei o cargo configurado para atender os tickets.');
+    return;
+  }
+
+  const existingChannel = await ticketManager.findExistingChannel(guild, message.author.id);
+  if (existingChannel) {
+    await message.reply(`Você já possui um ticket aberto em ${existingChannel}.`);
+    return;
+  }
+
+  let parent = null;
+  const categoryId = config.tickets?.categoryId;
+  if (categoryId) {
+    parent =
+      guild.channels.cache.get(categoryId) || (await guild.channels.fetch(categoryId).catch(() => null));
+    if (!parent || parent.type !== ChannelType.GuildCategory) {
+      await message.reply('A categoria configurada para tickets não foi encontrada ou não é uma categoria válida.');
+      return;
+    }
+  }
+
+  const reason = Array.isArray(reasonParts) ? reasonParts.join(' ').trim() : '';
+  const limitedReason = reason.slice(0, 1024);
+
+  let channel;
+  try {
+    const permissionOverwrites = [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+      {
+        id: message.author.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+      },
+      {
+        id: supportRoleId,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.SendMessages,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+      },
+    ];
+
+    const channelOptions = {
+      name: buildTicketChannelName(message.author),
+      type: ChannelType.GuildText,
+      topic: `Ticket aberto por ${message.author.tag ?? message.author.username} (${message.author.id})`,
+      permissionOverwrites,
+    };
+
+    if (parent) {
+      channelOptions.parent = parent;
+    }
+
+    channel = await guild.channels.create(channelOptions);
+  } catch (error) {
+    console.error('Erro ao criar canal de ticket:', error);
+    await message.reply('❌ Não foi possível criar o canal do ticket. Verifique as permissões do bot.');
+    return;
+  }
+
+  try {
+    await ticketManager.registerTicket(guild.id, message.author.id, channel.id);
+  } catch (error) {
+    console.error('Erro ao registrar ticket:', error);
+    await channel.delete('Falha ao registrar ticket').catch(() => {});
+    await message.reply('❌ Não foi possível registrar o ticket. Tente novamente mais tarde.');
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('Ticket de suporte')
+    .setDescription('Descreva seu pedido ou problema e aguarde um membro da equipe.')
+    .setColor(0x5865f2)
+    .addFields({ name: 'Aberto por', value: `<@${message.author.id}>`, inline: true })
+    .setTimestamp(new Date());
+
+  if (supportRoleId) {
+    embed.addFields({ name: 'Equipe responsável', value: `<@&${supportRoleId}>`, inline: true });
+  }
+
+  if (limitedReason) {
+    embed.addFields({ name: 'Resumo inicial', value: limitedReason });
+  }
+
+  const closeButton = new ButtonBuilder()
+    .setCustomId(`ticket:close:${message.author.id}`)
+    .setLabel('Encerrar ticket')
+    .setStyle(ButtonStyle.Danger);
+
+  const allowedMentions = { users: [message.author.id] };
+  if (supportRoleId) {
+    allowedMentions.roles = [supportRoleId];
+  }
+
+  try {
+    const contentParts = [`<@${message.author.id}> ticket aberto.`];
+    if (supportRoleId) {
+      contentParts.push(`<@&${supportRoleId}>`);
+    }
+
+    await channel.send({
+      content: contentParts.join(' '),
+      embeds: [embed],
+      components: [new ActionRowBuilder().addComponents(closeButton)],
+      allowedMentions,
+    });
+
+    await message.reply(`🎟️ Seu ticket foi aberto em ${channel}.`);
+  } catch (error) {
+    console.error('Erro ao finalizar configuração do ticket:', error);
+    await ticketManager
+      .clearTicket(guild.id, message.author.id)
+      .catch((clearError) => console.error('Falha ao limpar ticket após erro.', clearError));
+    await channel.delete('Falha ao enviar mensagem inicial do ticket').catch(() => {});
+    await message.reply('❌ Ocorreu um erro ao preparar o ticket. Tente novamente mais tarde.');
+  }
+}
+
+async function closeTicketCommand(message) {
+  if (!message.guild) {
+    await message.reply('Este comando só pode ser usado dentro de um servidor.');
+    return;
+  }
+
+  const ownerId = ticketManager.getTicketOwnerByChannel(message.guild.id, message.channel.id);
+  if (!ownerId) {
+    await message.reply('Este canal não corresponde a um ticket criado pelo bot.');
+    return;
+  }
+
+  const supportRoleId = config.tickets?.supportRoleId;
+  const member = message.member;
+  const isOwner = message.author.id === ownerId;
+  const hasSupportRole = Boolean(supportRoleId && member?.roles?.cache?.has(supportRoleId));
+
+  if (!isOwner && !hasSupportRole) {
+    await message.reply('Apenas o autor do ticket ou o cargo configurado pode encerrá-lo.');
+    return;
+  }
+
+  const acknowledgement = await message.reply('Fechando o ticket...');
+  const result = await closeTicketChannel(message.channel, ownerId, message.author.id);
+
+  if (result.ok) {
+    await acknowledgement.edit('Ticket encerrado. Este canal será removido em instantes.');
+  } else {
+    await acknowledgement.edit(
+      `❌ Não foi possível encerrar o ticket: ${result.error?.message ?? 'erro desconhecido'}.`,
+    );
+  }
+}
+
+async function handleTicketInteraction(interaction) {
+  const [, action, ownerId] = interaction.customId.split(':');
+
+  switch (action) {
+    case 'close':
+      await handleTicketCloseInteraction(interaction, ownerId);
+      break;
+    default:
+      break;
+  }
+}
+
+async function handleTicketCloseInteraction(interaction, ownerId) {
+  if (!interaction.channel || !interaction.channel.isTextBased()) {
+    await interaction.reply({ content: 'Não foi possível identificar este ticket.', ephemeral: true });
+    return;
+  }
+
+  const supportRoleId = config.tickets?.supportRoleId;
+  const member = interaction.member;
+  const isOwner = ownerId && interaction.user.id === ownerId;
+  const hasSupportRole = Boolean(supportRoleId && member?.roles?.cache?.has(supportRoleId));
+
+  if (!isOwner && !hasSupportRole) {
+    await interaction.reply({
+      content: 'Apenas o autor do ticket ou o cargo configurado pode encerrá-lo.',
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const result = await closeTicketChannel(interaction.channel, ownerId, interaction.user.id);
+  if (result.ok) {
+    await interaction.editReply('Ticket encerrado. Este canal será removido em instantes.');
+  } else {
+    await interaction.editReply(
+      `❌ Não foi possível encerrar o ticket: ${result.error?.message ?? 'erro desconhecido'}.`,
+    );
+  }
+}
+
+async function closeTicketChannel(channel, ownerId, closedById) {
+  try {
+    if (ownerId) {
+      try {
+        const removed = await ticketManager.clearTicket(channel.guild.id, ownerId);
+        if (!removed) {
+          await ticketManager.clearTicketByChannel(channel.guild.id, channel.id);
+        }
+      } catch (error) {
+        console.error('Erro ao atualizar registro do ticket ao encerrar.', error);
+      }
+    } else {
+      try {
+        await ticketManager.clearTicketByChannel(channel.guild.id, channel.id);
+      } catch (error) {
+        console.error('Erro ao limpar ticket ao encerrar.', error);
+      }
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('Ticket encerrado')
+      .setDescription(`Encerrado por <@${closedById}>.`)
+      .setColor(0xed4245)
+      .setTimestamp(new Date());
+
+    if (ownerId) {
+      embed.addFields({ name: 'Participante', value: `<@${ownerId}>`, inline: true });
+    }
+
+    await channel.send({
+      embeds: [embed],
+      allowedMentions: { users: [closedById, ownerId].filter(Boolean) },
+    });
+
+    setTimeout(() => {
+      channel.delete('Ticket encerrado').catch((error) => {
+        console.error('Erro ao remover canal do ticket encerrado.', error);
+      });
+    }, TICKET_CLOSE_DELAY_MS);
+
+    return { ok: true };
+  } catch (error) {
+    console.error('Erro ao encerrar ticket:', error);
+    return { ok: false, error };
+  }
+}
+
+function buildTicketChannelName(user) {
+  const base = typeof user.username === 'string' ? user.username : 'usuario';
+  const normalized = base
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]/gi, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase();
+
+  const suffix = user.id ? user.id.slice(-4) : Math.random().toString(36).slice(-4);
+  const prefix = normalized ? normalized.slice(0, 16) : 'ticket';
+
+  return `ticket-${prefix}-${suffix}`;
 }
 
 async function endEventAndSendReport(guild, fallbackChannelId, eventName, roleId, requester) {
@@ -430,6 +760,8 @@ async function handleHelpCommand(message) {
     `• \`${prefix}reaction-role remove <messageId>\` — remove a atribuição de cargo por reação.`,
     `• \`${prefix}warn\` — abre o assistente para enviar um aviso.`,
     `• \`${prefix}warn #canal "Mensagem"\` — envia um aviso para o canal informado.`,
+    `• \`${prefix}ticket open [motivo]\` — cria um canal privado com a equipe configurada para suporte.`,
+    `• \`${prefix}ticket close\` — encerra o ticket atual (execute dentro do canal do ticket).`,
   ];
 
   await message.reply(lines.join('\n'));

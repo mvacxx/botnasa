@@ -7,6 +7,7 @@ Este documento descreve o funcionamento de cada módulo do bot, bem como os coma
 - **Token do bot:** defina a variável de ambiente `DISCORD_TOKEN` no arquivo `.env`.
 - **Prefixo de comandos:** ajustável em `config/config.json` (padrão `!`).
 - **Canal padrão para relatórios:** `defaultReportChannelId` no mesmo arquivo é usado como fallback caso o envio por mensagem direta falhe e o bot precise publicar o documento em um canal.
+- **Tickets:** defina `tickets.supportRoleId` com o cargo que poderá visualizar e resolver os tickets; opcionalmente configure `tickets.categoryId` com a categoria onde os canais de suporte serão criados.
 
 ## Módulos principais
 
@@ -25,6 +26,14 @@ Cuida das mensagens que atribuem cargos por reação.
 - **removeReactionRole(messageId):** remove a associação registrada sem apagar a mensagem original.
 - **handleReactionAdd / handleReactionRemove:** concedem ou removem o cargo automaticamente quando um usuário (não bot) adiciona ou remove a reação configurada.
 - As configurações são persistidas em `data/reaction-roles.json`.
+
+### `TicketManager`
+Gerencia os tickets de suporte abertos pelos usuários.
+
+- **registerTicket(guildId, userId, channelId):** registra o canal criado para um ticket aberto por determinado usuário.
+- **getOpenTicket / findExistingChannel:** permitem verificar se o usuário já possui um ticket ativo e reutilizar o canal existente.
+- **clearTicket / clearTicketByChannel:** removem o registro quando o ticket é encerrado ou o canal é excluído manualmente.
+- Os tickets ativos são persistidos em `data/tickets.json`.
 
 ### `Comandos do bot`
 
@@ -104,10 +113,24 @@ Cuida das mensagens que atribuem cargos por reação.
   - Confirme para que o bot publique a mensagem no canal escolhido.
 - **Expiração:** sessões inativas são canceladas automaticamente; execute o comando novamente para reiniciar.
 
+#### `ticket open [motivo]`
+- **Função:** abre um canal privado de suporte visível para o usuário solicitante e para o cargo definido em `tickets.supportRoleId`.
+- **Comportamento:**
+  - O bot verifica se já existe um ticket aberto pelo usuário e reutiliza o canal existente quando necessário.
+  - O canal é criado com permissões restritas, opcionalmente dentro da categoria configurada em `tickets.categoryId`.
+  - Um botão **Encerrar ticket** é publicado para que o solicitante ou a equipe possam finalizar o atendimento.
+  - O argumento opcional `[motivo]` é anexado ao ticket como resumo inicial para agilizar o suporte.
+
+#### `ticket close`
+- **Função:** encerra o ticket atual quando executado dentro de um canal de ticket.
+- **Permissões:** disponível para o autor do ticket ou membros que possuam o cargo configurado em `tickets.supportRoleId`.
+- **Resultado:** o bot registra o encerramento, informa o canal e remove o ticket automaticamente após alguns segundos.
+
 ## Persistência de dados
 
 - `data/events.json`: armazena o histórico de eventos encerrados, permitindo consulta posterior.
 - `data/reaction-roles.json`: salva as configurações de cargos por reação.
+- `data/tickets.json`: mantém o registro de tickets ativos para impedir duplicidades e limpar canais removidos manualmente.
 
 Os arquivos reais são criados automaticamente na primeira execução. Modelos de referência estão disponíveis como `data/events.template.json` e `data/reaction-roles.template.json`.
 

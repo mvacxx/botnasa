@@ -1,4 +1,8 @@
 {
   "prefix": "!",
-  "defaultReportChannelId": ""
+  "defaultReportChannelId": "",
+  "tickets": {
+    "supportRoleId": "",
+    "categoryId": ""
+  }
 }
