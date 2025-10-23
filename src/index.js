@@ -1495,6 +1495,7 @@ async function startInteractiveWarn(message) {
     expiresAt: Date.now() + 10 * 60 * 1000,
     targetChannelId: null,
     messageContent: '',
+    roleIds: [],
     image: null,
     awaitingAttachment: false,
   };
@@ -1529,6 +1530,13 @@ function buildWarnEmbed(session) {
         : 'Nenhuma mensagem definida.',
     },
     {
+      name: 'Cargos mencionados',
+      value:
+        session.roleIds && session.roleIds.length > 0
+          ? session.roleIds.map((roleId) => `<@&${roleId}>`).join(', ')
+          : 'Nenhum cargo selecionado.',
+    },
+    {
       name: 'Imagem',
       value: session.awaitingAttachment
         ? 'Aguardando envio da imagem...'
@@ -1561,6 +1569,22 @@ function buildWarnComponents(session) {
 
   rows.push(new ActionRowBuilder().addComponents(channelSelect));
 
+  const roleSelect = new RoleSelectMenuBuilder()
+    .setCustomId(`warn:roles:${session.id}`)
+    .setPlaceholder(
+      session.roleIds && session.roleIds.length > 0
+        ? 'Cargos selecionados'
+        : 'Selecione cargos para mencionar',
+    )
+    .setMinValues(0)
+    .setMaxValues(10);
+
+  if (session.roleIds && session.roleIds.length > 0) {
+    roleSelect.setDefaultRoles(session.roleIds);
+  }
+
+  rows.push(new ActionRowBuilder().addComponents(roleSelect));
+
   const actionButtons = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
       .setCustomId(`warn:setMessage:${session.id}`)
@@ -1591,6 +1615,22 @@ function buildWarnComponents(session) {
   return rows;
 }
 
+function buildWarnContent(session) {
+  const mentionText = session.roleIds && session.roleIds.length > 0
+    ? session.roleIds.map((roleId) => `<@&${roleId}>`).join(' ')
+    : '';
+
+  if (!mentionText) {
+    return session.messageContent;
+  }
+
+  if (!session.messageContent) {
+    return mentionText;
+  }
+
+  return `${mentionText}\n${session.messageContent}`;
+}
+
 async function handleWarnInteraction(interaction) {
   const [, action, sessionId] = interaction.customId.split(':');
   const session = warnSessions.get(sessionId);
@@ -1605,6 +1645,9 @@ async function handleWarnInteraction(interaction) {
   switch (action) {
     case 'channel':
       await handleWarnChannelSelection(interaction, session);
+      break;
+    case 'roles':
+      await handleWarnRoleSelection(interaction, session);
       break;
     case 'setMessage':
       await showWarnMessageModal(interaction, session);
@@ -1637,6 +1680,20 @@ async function handleWarnChannelSelection(interaction, session) {
   }
 
   session.targetChannelId = selected;
+  session.updatedAt = Date.now();
+
+  await interaction.update({
+    content: `<@${session.userId}> vamos preparar um aviso.`,
+    embeds: [buildWarnEmbed(session)],
+    components: buildWarnComponents(session),
+    allowedMentions: { users: [] },
+  });
+}
+
+async function handleWarnRoleSelection(interaction, session) {
+  const roleIds = Array.isArray(interaction.values) ? interaction.values : [];
+
+  session.roleIds = roleIds;
   session.updatedAt = Date.now();
 
   await interaction.update({
@@ -1722,7 +1779,7 @@ async function confirmWarn(interaction, session) {
       throw new Error('Não foi possível acessar o canal selecionado.');
     }
 
-    const payload = { content: session.messageContent };
+    const payload = { content: buildWarnContent(session), allowedMentions: { roles: session.roleIds || [] } };
     if (session.image?.url) {
       payload.files = [new AttachmentBuilder(session.image.url, { name: session.image.name })];
     }
