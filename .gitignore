@@ -1,0 +1,10 @@
+node_modules/
+.env
+config/*.json
+!config/config.example.json
+data/*.json
+!data/events.template.json
+!data/reaction-roles.template.json
+!data/tickets.template.json
+npm-debug.log
+.DS_Store

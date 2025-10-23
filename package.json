@@ -1,0 +1,22 @@
+{
+  "name": "discord-event-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that tracks attendance for events, manages reaction roles, and sends announcements.",
+  "type": "commonjs",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "attendance",
+    "reaction-roles"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "dotenv": "^16.4.5"
+  }
+}
