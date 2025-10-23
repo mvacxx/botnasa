@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const {
   ActionRowBuilder,
+  AttachmentBuilder,
   ButtonBuilder,
   ButtonStyle,
   ChannelSelectMenuBuilder,
@@ -76,6 +77,15 @@ client.on('voiceStateUpdate', (oldState, newState) => {
 
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author.bot) return;
+
+  const pendingWarnSession = findWarnAttachmentSession(message);
+  if (pendingWarnSession && message.attachments?.size) {
+    const handled = await handleWarnAttachmentMessage(message, pendingWarnSession);
+    if (handled) {
+      return;
+    }
+  }
+
   if (!message.content.startsWith(config.prefix)) return;
 
   const withoutPrefix = message.content.slice(config.prefix.length).trim();
@@ -1485,6 +1495,8 @@ async function startInteractiveWarn(message) {
     expiresAt: Date.now() + 10 * 60 * 1000,
     targetChannelId: null,
     messageContent: '',
+    image: null,
+    awaitingAttachment: false,
   };
 
   const reply = await message.reply({
@@ -1516,7 +1528,19 @@ function buildWarnEmbed(session) {
         ? session.messageContent.slice(0, MAX_ASSISTANT_MESSAGE_LENGTH)
         : 'Nenhuma mensagem definida.',
     },
+    {
+      name: 'Imagem',
+      value: session.awaitingAttachment
+        ? 'Aguardando envio da imagem...'
+        : session.image
+        ? `[${session.image.name}](${session.image.url})`
+        : 'Nenhuma imagem selecionada.',
+    },
   );
+
+  if (session.image?.url) {
+    embed.setImage(session.image.url);
+  }
 
   return embed;
 }
@@ -1542,6 +1566,16 @@ function buildWarnComponents(session) {
       .setCustomId(`warn:setMessage:${session.id}`)
       .setLabel('Editar mensagem')
       .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId(`warn:addImage:${session.id}`)
+      .setLabel('Adicionar imagem')
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(Boolean(session.awaitingAttachment)),
+    new ButtonBuilder()
+      .setCustomId(`warn:removeImage:${session.id}`)
+      .setLabel('Remover imagem')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!session.image),
     new ButtonBuilder()
       .setCustomId(`warn:confirm:${session.id}`)
       .setLabel('Enviar aviso')
@@ -1574,6 +1608,12 @@ async function handleWarnInteraction(interaction) {
       break;
     case 'setMessage':
       await showWarnMessageModal(interaction, session);
+      break;
+    case 'addImage':
+      await requestWarnImage(interaction, session);
+      break;
+    case 'removeImage':
+      await clearWarnImage(interaction, session);
       break;
     case 'confirm':
       await confirmWarn(interaction, session);
@@ -1663,6 +1703,14 @@ async function confirmWarn(interaction, session) {
     return;
   }
 
+  if (session.awaitingAttachment) {
+    await interaction.reply({
+      content: 'Envie a imagem solicitada ou cancele a seleção antes de enviar o aviso.',
+      ephemeral: true,
+    });
+    return;
+  }
+
   await interaction.deferReply({ ephemeral: true });
 
   try {
@@ -1674,7 +1722,12 @@ async function confirmWarn(interaction, session) {
       throw new Error('Não foi possível acessar o canal selecionado.');
     }
 
-    await channel.send({ content: session.messageContent });
+    const payload = { content: session.messageContent };
+    if (session.image?.url) {
+      payload.files = [new AttachmentBuilder(session.image.url, { name: session.image.name })];
+    }
+
+    await channel.send(payload);
 
     warnSessions.delete(session.id);
 
@@ -1714,6 +1767,99 @@ async function cancelWarn(interaction, session) {
     components: [],
     allowedMentions: { users: [session.userId] },
   });
+}
+
+function findWarnAttachmentSession(message) {
+  for (const session of warnSessions.values()) {
+    if (
+      session.awaitingAttachment &&
+      session.guildId === message.guild.id &&
+      session.channelId === message.channel.id &&
+      session.userId === message.author.id
+    ) {
+      return session;
+    }
+  }
+
+  return null;
+}
+
+async function handleWarnAttachmentMessage(message, session) {
+  const attachment = message.attachments.find((item) => {
+    if (!item) return false;
+    const contentType = item.contentType || '';
+    if (contentType.startsWith('image/')) return true;
+    return /\.(png|jpe?g|gif|webp)$/i.test(item.name || '');
+  });
+
+  if (!attachment) {
+    await message.reply('Envie uma imagem válida para anexar ao aviso.');
+    return true;
+  }
+
+  session.image = {
+    url: attachment.url,
+    name: attachment.name || 'imagem.png',
+  };
+  session.awaitingAttachment = false;
+  session.updatedAt = Date.now();
+
+  const sessionMessage = await fetchSessionMessage(message.guild, session);
+  if (sessionMessage) {
+    await sessionMessage.edit({
+      content: `<@${session.userId}> vamos preparar um aviso.`,
+      embeds: [buildWarnEmbed(session)],
+      components: buildWarnComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await message.reply('✅ Imagem adicionada ao aviso.');
+
+  return true;
+}
+
+async function requestWarnImage(interaction, session) {
+  session.awaitingAttachment = true;
+  session.updatedAt = Date.now();
+
+  const message = await fetchSessionMessage(interaction.guild, session);
+  if (message) {
+    await message.edit({
+      content: `<@${session.userId}> vamos preparar um aviso.`,
+      embeds: [buildWarnEmbed(session)],
+      components: buildWarnComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await interaction.reply({
+    content: 'Envie a imagem desejada neste canal. Ela substituirá qualquer imagem selecionada anteriormente.',
+    ephemeral: true,
+  });
+}
+
+async function clearWarnImage(interaction, session) {
+  if (!session.image) {
+    await interaction.reply({ content: 'Nenhuma imagem foi selecionada.', ephemeral: true });
+    return;
+  }
+
+  session.image = null;
+  session.awaitingAttachment = false;
+  session.updatedAt = Date.now();
+
+  const message = await fetchSessionMessage(interaction.guild, session);
+  if (message) {
+    await message.edit({
+      content: `<@${session.userId}> vamos preparar um aviso.`,
+      embeds: [buildWarnEmbed(session)],
+      components: buildWarnComponents(session),
+      allowedMentions: { users: [] },
+    });
+  }
+
+  await interaction.reply({ content: 'Imagem removida do aviso.', ephemeral: true });
 }
 
 async function startInteractiveReactionRoleCreation(message) {
