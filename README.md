@@ -33,3 +33,7 @@ Bot de Discord em JavaScript para rastrear presença em eventos, administrar car
 ## Documentação detalhada
 
 A explicação completa das funcionalidades e comandos está disponível em [`docs/BOT_DOCUMENTATION.md`](docs/BOT_DOCUMENTATION.md).
+
+Para orientações de implantação, consulte:
+
+- [Guia de deploy na RedHosting](docs/DEPLOY_REDHOSTING.md)
