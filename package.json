@@ -3,9 +3,9 @@
   "version": "1.0.0",
   "description": "Discord bot that tracks attendance for events, manages reaction roles, and sends announcements.",
   "type": "commonjs",
-  "main": "src/index.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node index.js"
   },
   "keywords": [
     "discord",
