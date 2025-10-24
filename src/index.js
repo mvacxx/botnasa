@@ -666,9 +666,11 @@ async function closeTicketChannel(channel, ownerId, closedById) {
       embed.addFields({ name: 'Participante', value: `<@${ownerId}>`, inline: true });
     }
 
+    const mentionUserIds = [...new Set([closedById, ownerId].filter(Boolean))];
+
     await channel.send({
       embeds: [embed],
-      allowedMentions: { users: [closedById, ownerId].filter(Boolean) },
+      allowedMentions: { users: mentionUserIds },
     });
 
     setTimeout(() => {
