@@ -2343,15 +2343,25 @@ async function fetchSessionMessage(guild, session) {
   return message;
 }
 
-bootstrap()
-  .then(() => {
-    const token = process.env.DISCORD_TOKEN;
-    if (!token) {
-      throw new Error('Defina a variável de ambiente DISCORD_TOKEN com o token do bot.');
-    }
-    return client.login(token);
-  })
-  .catch((error) => {
+async function startBot() {
+  await bootstrap();
+
+  const token = process.env.DISCORD_TOKEN;
+  if (!token) {
+    throw new Error('Defina a variável de ambiente DISCORD_TOKEN com o token do bot.');
+  }
+
+  return client.login(token);
+}
+
+if (require.main === module) {
+  startBot().catch((error) => {
     console.error('Falha ao inicializar o bot.', error);
     process.exit(1);
   });
+}
+
+module.exports = {
+  startBot,
+  client,
+};
